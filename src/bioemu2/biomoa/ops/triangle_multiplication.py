@@ -12,7 +12,7 @@ Convenience wrappers expose outgoing and incoming triangle multiplication.
 """
 
 import logging
-from enum import Enum
+from enum import StrEnum
 
 import torch
 import torch.nn as nn
@@ -53,7 +53,7 @@ except ImportError:
 _DEFAULT_CUEQ_TILE_SIZE = 256
 
 
-class TriMulVariant(str, Enum):
+class TriMulVariant(StrEnum):
     FULL = "full"
     CUEQ = "cueq"
     CUEQ_TILED = "cueq_tiled"

@@ -27,7 +27,7 @@ import os
 from collections import OrderedDict
 from copy import deepcopy
 from math import prod
-from typing import Any, Optional, Union
+from typing import Any, Union
 from warnings import warn
 
 import torch
@@ -89,7 +89,7 @@ class DistributedManager:
     _node_rank: int
     _local_rank: int
     _device: torch.device
-    _backend: Optional[str]
+    _backend: str | None
     _device_mesh: Any
     _layout_device_mesh: Any
     _has_subgroups: bool
@@ -102,7 +102,7 @@ class DistributedManager:
     _subgroups_rank: dict[str, Any]
     _subgroups_ranks: dict[str, Any]
     _layout_subgroups: dict[str, Any]
-    _method_init: Optional[str]
+    _method_init: str | None
 
     def __new__(cls):
         """
@@ -174,7 +174,7 @@ class DistributedManager:
         return {"ENV"}
 
     @classmethod
-    def backend_for_device(cls) -> dict[str, Optional[str]]:
+    def backend_for_device(cls) -> dict[str, str | None]:
         """
         Returns the mapping of device types to their default backend.
 
@@ -278,13 +278,13 @@ class DistributedManager:
 
     @staticmethod
     def _setup(
-        grid_group_sizes: Optional[_GridGroupSizesType] = None,
+        grid_group_sizes: _GridGroupSizesType | None = None,
         device_type: str = "cuda",
-        backend: Optional[str] = None,
+        backend: str | None = None,
         rank: int = -1,
         node_rank: int = -1,
         world_size: int = -1,
-        local_rank: Optional[int] = None,
+        local_rank: int | None = None,
         addr: str = "localhost",
         port: str = "29500",
         method_init: str = "ENV",
@@ -448,7 +448,7 @@ class DistributedManager:
 
     @staticmethod
     def _create_device_mesh_and_groups(
-        name: list[str], shape: list[int], suffix_mesh: Optional[str] = None
+        name: list[str], shape: list[int], suffix_mesh: str | None = None
     ) -> None:
         """
         Creates a device mesh and associated process groups for distributed communication.
@@ -820,9 +820,9 @@ class DistributedManager:
 
     @staticmethod
     def initialize(
-        grid_group_sizes: Optional[OrderedDict[str, int | tuple[int, ...]]] = None,
+        grid_group_sizes: OrderedDict[str, int | tuple[int, ...]] | None = None,
         device_type: str = "cuda",
-        backend: Optional[str] = None,
+        backend: str | None = None,
         **kwargs_init_pg,
     ):
         """

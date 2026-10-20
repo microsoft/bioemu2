@@ -12,6 +12,7 @@ import torch
 from biotite.structure import AtomArray
 from rdkit import Chem
 
+from bioemu2.conditioning.contact import contact_conditioning_info
 from bioemu2.conditioning.method import SamplingMode, method_types_ids
 from bioemu2.data_interface.const import MolType, Token
 from bioemu2.data_interface.structure_hierarchy import (
@@ -353,7 +354,8 @@ class AllAtomStructure(TensorStore):
 
 def _get_ligand_structure(ligand: Ligand) -> AllAtomStructure:
     """Convert a Ligand entity to an AllAtomStructure."""
-    from bioemu2.structure.inference_inputs import (
+    # Deferred: these modules import AllAtomStructure from this module.
+    from bioemu2.structure.inference_inputs import (  # noqa: PLC0415
         inference_input_structure_from_ccd,
         inference_input_structure_from_inchi,
     )
@@ -399,10 +401,11 @@ def _get_branched_structure(
             residues are donors (and thus need leaving-atom removal). If ``None`` or empty,
             no leaving atoms are removed.
     """
-    from bioemu2.structure.inference_inputs import (
+    # Deferred: these modules import AllAtomStructure from this module.
+    from bioemu2.structure.inference_inputs import (  # noqa: PLC0415
         inference_input_structure_from_branched_entity,
     )
-    from bioemu2.structure.templates import is_leaving_atom_donor
+    from bioemu2.structure.templates import is_leaving_atom_donor  # noqa: PLC0415
 
     ccd_codes = [mod.ccd_code for mod in branched.mon_seq]
     num_residues = len(ccd_codes)
@@ -435,12 +438,13 @@ def _get_branched_structure(
 
 def _get_polymer_structure(polymer: Polymer) -> AllAtomStructure:
     """Convert a Polymer entity to an AllAtomStructure."""
-    from bioemu2.structure.inference_inputs import (
+    # Deferred: these modules import AllAtomStructure from this module.
+    from bioemu2.structure.inference_inputs import (  # noqa: PLC0415
         inference_input_structure_from_dna_sequence,
         inference_input_structure_from_protein_sequence,
         inference_input_structure_from_rna_sequence,
     )
-    from bioemu2.structure.templates import load_polymer_templates
+    from bioemu2.structure.templates import load_polymer_templates  # noqa: PLC0415
 
     mods_by_res_id = polymer.mods_by_res_id
     modifications: list[PolymerModification] = []
@@ -604,10 +608,6 @@ def _add_contact_conditioning(
     Returns:
         An updated AllAtomStructure with contact_conditioning and contact_threshold set.
     """
-    from bioemu2.conditioning.contact import (
-        contact_conditioning_info,
-    )
-
     letter_asym_id_to_num_asym_id = {
         asym_id: i for i, asym_id in enumerate(asym_id_to_chain_metadata)
     }
@@ -706,8 +706,9 @@ def _get_structure_from_system(
     mode: SamplingMode | None = None,
     contacts: list[Contact] | None = None,
 ) -> AllAtomStructure:
-    from bioemu2.structure.builder import StructureBuilder
-    from bioemu2.structure.ref_struct import (
+    # Deferred: these modules import AllAtomStructure from this module.
+    from bioemu2.structure.builder import StructureBuilder  # noqa: PLC0415
+    from bioemu2.structure.ref_struct import (  # noqa: PLC0415
         ensure_loaded_ref_struct,
         get_chain_residue_maps_from_atom_array,
         merge_ref_struct_to_allatom_chain,

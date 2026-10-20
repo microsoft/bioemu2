@@ -23,8 +23,6 @@
 # DEALINGS IN THE SOFTWARE.
 
 
-from typing import Optional
-
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -67,7 +65,7 @@ class _LinearParamsReplicatedImpl(torch.autograd.Function):
         ctx,
         x: DTensor,
         weight: DTensor,
-        bias: Optional[DTensor],
+        bias: DTensor | None,
         cast_params_dtype_to_x: bool = False,
         avg_over_replicate_param_grad: bool = True,
     ) -> DTensor:
@@ -242,7 +240,7 @@ class _LinearParamsReplicatedImpl(torch.autograd.Function):
     @torch.amp.custom_bwd(device_type="cuda")
     def backward(
         ctx, grad_output: DTensor
-    ) -> tuple[Optional[DTensor], Optional[DTensor], Optional[DTensor], None, None]:
+    ) -> tuple[DTensor | None, DTensor | None, DTensor | None, None, None]:
         """Backward pass for the distributed linear operation.
 
         Local einsum stays in the compute dtype (bf16 MMA accumulates in

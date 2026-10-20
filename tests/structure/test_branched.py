@@ -25,11 +25,16 @@ from bioemu2.data_interface import (
     ModifiedResidue,
     System,
 )
+from bioemu2.data_interface.const import MolType
 from bioemu2.structure import AllAtomStructure
 from bioemu2.structure.all_atom_structure import _get_branched_structure
-from bioemu2.structure.inference_inputs import inference_input_structure_from_branched_entity
+from bioemu2.structure.inference_inputs import (
+    inference_input_structure_from_branched_entity,
+    inference_input_structure_from_protein_sequence,
+)
 from bioemu2.structure.templates import (
     is_leaving_atom_donor,
+    load_polymer_templates,
     template_from_cifwrapper,
 )
 
@@ -156,8 +161,6 @@ class TestInferenceInputStructureFromBranchedEntity:
             )
 
     def test_mol_type_nonpolymer(self, mock_template_from_ccd):
-        from bioemu2.data_interface.const import MolType
-
         s = inference_input_structure_from_branched_entity(["NAG"])
         assert (s.mol_type == MolType.NONPOLYMER.value).all()
 
@@ -238,11 +241,6 @@ class TestSystemWithBranched:
     @staticmethod
     def _protein_atom_count(sequence: str) -> int:
         """Expected heavy-atom count for a canonical protein sequence."""
-        from bioemu2.structure.inference_inputs import (
-            inference_input_structure_from_protein_sequence,
-        )
-        from bioemu2.structure.templates import load_polymer_templates
-
         cache = load_polymer_templates()
         return inference_input_structure_from_protein_sequence(sequence, cache).num_nodes
 

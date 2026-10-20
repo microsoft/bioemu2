@@ -22,7 +22,6 @@
 # FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 
-from typing import Optional
 
 import torch
 from torch import Tensor
@@ -37,10 +36,10 @@ from bioemu2.context_parallel.ops.distributed_primitives.dtensor_metadata_tools 
 
 def redistribute_transpose(
     input: DTensor,
-    transpose_comm: Optional[TransposeComm],
-    output_placements: Optional[tuple[Placement, ...]],
-    dim0: Optional[int] = None,
-    dim1: Optional[int] = None,
+    transpose_comm: TransposeComm | None,
+    output_placements: tuple[Placement, ...] | None,
+    dim0: int | None = None,
+    dim1: int | None = None,
 ) -> DTensor:
     """Transpose a DTensor across device mesh (and locally).
 
@@ -88,10 +87,10 @@ class _RedistributeTransposeImpl(torch.autograd.Function):
     def forward(
         ctx: FunctionCtx,
         input: DTensor,
-        output_placements: Optional[tuple[Placement, ...]],
-        transpose_comm: Optional[TransposeComm],
-        dim0: Optional[int] = None,
-        dim1: Optional[int] = None,
+        output_placements: tuple[Placement, ...] | None,
+        transpose_comm: TransposeComm | None,
+        dim0: int | None = None,
+        dim1: int | None = None,
     ) -> DTensor:
         """Forward pass for _RedistributeTransposeImpl custom autograd function.
 

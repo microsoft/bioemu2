@@ -645,8 +645,9 @@ def test_edm_fkc_guidance_with_empty_local_clash_potential(tmp_path: Path) -> No
 
 
 def test_public_exports_importable():
-    from bioemu2 import Potential as ApiPotential
-    from bioemu2.denoising.steering import (  # noqa: F401
+    # Import inside the test so a broken public export fails this test rather than collection.
+    from bioemu2 import Potential as ApiPotential  # noqa: PLC0415
+    from bioemu2.denoising.steering import (  # noqa: F401, PLC0415
         Potential,
         edm_fkc_sampler,
         edm_steered_sampler,

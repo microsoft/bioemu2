@@ -20,6 +20,7 @@ carries its own 1-D GMM. We set ``sigma_data=1.0`` so the Karras sigmas are raw.
 from __future__ import annotations
 
 import math
+import os
 from types import SimpleNamespace
 from typing import cast
 
@@ -34,6 +35,7 @@ from bioemu2.denoising import cp_sync
 from bioemu2.denoising.steering import edm_steered_sampler
 from bioemu2.denoising.steering.feats import Tracker
 from bioemu2.model import InferenceModel
+from bioemu2.structure import BatchAllAtomStructure
 
 _SQRT2 = math.sqrt(2.0)
 _DUMMY_CONTEXT = SimpleNamespace(
@@ -129,7 +131,6 @@ def _run(
 ) -> torch.Tensor:
     """Seed, run the (geometry-neutralized) sampler, return final ``u`` [P, 3]."""
     torch.manual_seed(seed)
-    from bioemu2.structure import BatchAllAtomStructure
 
     score_model = _GMM()
     batch = _prepared_batch(score_model)
@@ -204,13 +205,11 @@ def test_unsteered_recovers_gmm(neutralized):
         assert w1 < _W1_RECOVER, f"axis {axis}: W1 to GMM = {w1:.3f} (> {_W1_RECOVER})"
 
     if make_plot:
-        import os
-
-        import matplotlib
+        # matplotlib is an optional viz dependency, and the backend must be set before pyplot loads.
+        import matplotlib  # noqa: PLC0415
 
         matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        import numpy as np
+        import matplotlib.pyplot as plt  # noqa: PLC0415
 
         grid = np.linspace(-7.0, 7.0, 600)
         p0 = sum(
@@ -326,13 +325,11 @@ def test_steered_recovers_tilted_gmm(neutralized, fk_lambda):
     w1 = _w1(u_steered, ref)
 
     if make_plot:
-        import os
-
-        import matplotlib
+        # matplotlib is an optional viz dependency, and the backend must be set before pyplot loads.
+        import matplotlib  # noqa: PLC0415
 
         matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        import numpy as np
+        import matplotlib.pyplot as plt  # noqa: PLC0415
 
         u_unsteered = _run(multiplicity=32000)[:, axis].numpy()
         grid = np.linspace(-7.0, 7.0, 600)
@@ -390,8 +387,6 @@ def test_steered_recovers_tilted_gmm(neutralized, fk_lambda):
 def test_edm_steered_sampler_validates_kwargs() -> None:
     """The sampler validates its resampling kwargs up front, before touching
     ``batch``/``score_model``."""
-    from bioemu2.structure import BatchAllAtomStructure
-
     batch = _prepared_batch(_GMM())
 
     def _call(**kwargs):

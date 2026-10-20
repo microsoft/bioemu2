@@ -22,7 +22,7 @@ repos:
       - id: ruff-format
         args: [--config=pyproject.toml]
         files: ^(src|tests)/.*\.py$
-      - id: ruff
+      - id: ruff-check
         args: [--fix, --config=pyproject.toml]
         files: ^(src|tests)/.*\.py$
 

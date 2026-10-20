@@ -23,7 +23,7 @@
 # DEALINGS IN THE SOFTWARE.
 
 
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -40,7 +40,7 @@ class One2OneComm:
         group: dist.ProcessGroup,
         rank_send_to: int,
         rank_recv_from: int,
-        parity: Optional[bool] = None,
+        parity: bool | None = None,
     ):
         """
         Initializes a One2OneComm instance for point-to-point communication.
@@ -119,7 +119,7 @@ class One2OneComm:
     def _prep_batch_isend_irecv(
         self,
         to_send: torch.Tensor,
-        to_recv: Optional[torch.Tensor] = None,
+        to_recv: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Prepare tensors and communication operations for batch send/receive.
@@ -251,7 +251,7 @@ class One2OneComm:
     def enqueue_to_dispatch(
         self,
         to_send: torch.Tensor,
-        to_recv: Optional[torch.Tensor] = None,
+        to_recv: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Enqueue a communication operation and immediately dispatch it.

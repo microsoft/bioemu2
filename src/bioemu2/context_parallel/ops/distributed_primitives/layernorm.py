@@ -23,7 +23,7 @@
 # DEALINGS IN THE SOFTWARE.
 
 
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -65,10 +65,10 @@ class _LayerNormParamsReplicatedImpl(torch.autograd.Function):
         ctx,
         x: DTensor,
         normalized_shape: list[int],
-        weight: Optional[DTensor],
-        bias: Optional[DTensor],
+        weight: DTensor | None,
+        bias: DTensor | None,
         eps: float,
-        cast_params_dtype_to_x: Optional[bool] = False,
+        cast_params_dtype_to_x: bool | None = False,
         avg_over_replicate_param_grad: bool = True,
     ) -> DTensor:
         """
@@ -232,7 +232,7 @@ class _LayerNormParamsReplicatedImpl(torch.autograd.Function):
     @torch.amp.custom_bwd(device_type="cuda")
     def backward(
         ctx, grad_output: DTensor
-    ) -> tuple[Optional[DTensor], None, Optional[DTensor], Optional[DTensor], None, None, None]:
+    ) -> tuple[DTensor | None, None, DTensor | None, DTensor | None, None, None, None]:
         """
         Backward pass of LayerNorm with replicated parameters.
 

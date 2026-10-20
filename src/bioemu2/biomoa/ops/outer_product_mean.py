@@ -9,7 +9,7 @@ Two variants:
 Refs: feynman#20160, feynman#20463.
 """
 
-from enum import Enum
+from enum import StrEnum
 
 import torch
 import torch.nn as nn
@@ -24,7 +24,7 @@ _DEFAULT_TRITON_TILE_SIZE = 256
 _PROJECTION_ROWS = 256
 
 
-class OPMVariant(str, Enum):
+class OPMVariant(StrEnum):
     VANILLA = "vanilla"
     TRITON_MEMORY_SAVING = "triton_memory_saving"
 

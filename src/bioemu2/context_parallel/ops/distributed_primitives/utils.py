@@ -23,7 +23,6 @@
 # DEALINGS IN THE SOFTWARE.
 
 import math
-from typing import Optional
 
 import torch
 import torch.distributed as dist
@@ -1044,12 +1043,12 @@ def get_flattened_range_indices(
 
 
 def _distributed_pack_and_pad(
-    input: Optional[DTensor],
+    input: DTensor | None,
     mask: DTensor,
     axis: int,
     W: int,
     keep_input_padding: bool = False,
-) -> tuple[Optional[DTensor], DTensor, torch.Tensor, torch.Tensor]:
+) -> tuple[DTensor | None, DTensor, torch.Tensor, torch.Tensor]:
     """Distributed left-pack and pad operation for DTensor inputs.
 
     Left-packs valid elements (as indicated by mask) to the front along the specified axis,

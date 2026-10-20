@@ -1,12 +1,10 @@
 # Vendored from NVIDIA Fold-CP (MIT): https://github.com/NVIDIA-BioNeMo/boltz-cp @ f76f37a77c854b56b6250b426af8c2d63b501f7f
 # Source: src/boltz/distributed/model/modules/utils.py (single function extracted).
 
-from typing import Optional
-
 
 def validate_window_batching_parameters(
-    attn_window_queries: Optional[int],
-    attn_window_keys: Optional[int],
+    attn_window_queries: int | None,
+    attn_window_keys: int | None,
     use_window_batching: bool,
 ) -> None:
     """Validates parameters for window batching in attention mechanisms.
