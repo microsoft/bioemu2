@@ -23,7 +23,11 @@ dependencies = [
     "einops",
     "huggingface_hub",
     "hydra-core",
-    "mdtraj",
+    # mdtraj 1.11.2 added an overflow heuristic to Trajectory.superpose(): it raises OverflowError
+    # when every coordinate of the first frame is zero once centred on the alignment selection. A
+    # single-atom trajectory centres exactly onto the origin, so the guard misfires on valid input.
+    # uv.lock already resolves 1.11.1.post2; this keeps the documented pip install path in step.
+    "mdtraj<1.11.2",
     "numba",
     "numpy<2.5",
     "omegaconf",
