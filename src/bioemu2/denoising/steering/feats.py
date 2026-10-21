@@ -13,7 +13,7 @@ need:
      `batch.entity_id`.
    - Tier 2: RDKit-derived per-residue constraints (`rdkit_bounds_*`,
      `chiral_*`, `stereo_*`, `planar_*`). Computed for every non-polymer
-     residue when a map from chain index to CCD code or RDKit molecule is supplied; left empty
+     residue when a `{int_asym_id: ccd_code | Chem.Mol}` map is supplied; left empty
      otherwise. Building blocks: `steering/rdkit_constraints.py` —
      `compute_geometry_constraints`, `compute_chiral_atom_constraints`,
      `compute_stereo_bond_constraints`, `compute_flatness_constraints`
@@ -180,7 +180,6 @@ def potential_features_from_system(system: System) -> dict[str, torch.Tensor]:
                 if entity.smiles is not None
                 else entity.inchi
             )
-            # Match the template's atom naming without generating a conformer.
             mol = Chem.AddHs(Chem.MolFromInchi(inchi))
             _assign_mol_atom_names(mol)
             mol = Chem.RemoveAllHs(mol)
@@ -221,7 +220,7 @@ def build_potential_features(
 
     Args:
         batch: dense-batched structure (as built by `batch_collate`).
-        ligand_ccd_codes: Map from chain index to CCD code or named RDKit molecule for the ligand
+        ligand_ccd_codes: `{int_asym_id: ccd_3letter_code | Chem.Mol}` for the ligand
             chains in the batch. When non-empty, Tier-2 (RDKit per-residue
             constraints) is populated for each entry; PoseBusters, chiral,
             stereo, and planar potentials then evaluate those constraints.
