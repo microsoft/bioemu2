@@ -13,7 +13,7 @@ need:
      `batch.entity_id`.
    - Tier 2: RDKit-derived per-residue constraints (`rdkit_bounds_*`,
      `chiral_*`, `stereo_*`, `planar_*`). Computed for every non-polymer
-     residue when a `{int_asym_id: ccd_code}` map is supplied; left empty
+     residue when a `{int_asym_id: ccd_code | Chem.Mol}` map is supplied; left empty
      otherwise. Building blocks: `steering/rdkit_constraints.py` —
      `compute_geometry_constraints`, `compute_chiral_atom_constraints`,
      `compute_stereo_bond_constraints`, `compute_flatness_constraints`
@@ -32,6 +32,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from huggingface_hub import hf_hub_download
+from rdkit import Chem
 from torch.nn import functional as F
 from torch.nn.functional import one_hot
 
@@ -45,6 +46,7 @@ from bioemu2.denoising.steering.rdkit_constraints import (
 )
 from bioemu2.structure import AllAtomStructure, BatchAllAtomStructure, decode_atom_name
 from bioemu2.structure.batch import REQUIRES_MSA_PADDING, batch_collate
+from bioemu2.structure.templates import _assign_mol_atom_names
 
 _CCD_REPO = "boltz-community/boltz-1"
 MAX_ELEMENTS: int = 128
@@ -169,7 +171,23 @@ def potential_features_from_system(system: System) -> dict[str, torch.Tensor]:
     are irrelevant; ``mode="structure"`` matches ``System.topology``.
     """
     batch = batch_collate([AllAtomStructure.from_system(system, mode="structure")])
-    return build_potential_features(batch, ligand_ccd_codes_from_system(system))
+    ligand_refs: dict[int, str | Chem.Mol] = dict(ligand_ccd_codes_from_system(system))
+    chain_index = 0
+    for entity in system.entities:
+        if isinstance(entity, Ligand) and entity.ccd_code is None:
+            inchi = (
+                Chem.MolToInchi(Chem.MolFromSmiles(entity.smiles))
+                if entity.smiles is not None
+                else entity.inchi
+            )
+            mol = Chem.AddHs(Chem.MolFromInchi(inchi))
+            _assign_mol_atom_names(mol)
+            mol = Chem.RemoveAllHs(mol)
+            Chem.AssignStereochemistry(mol, cleanIt=True, force=True)
+            for index in range(chain_index, chain_index + len(entity.asym_ids)):
+                ligand_refs[index] = mol
+        chain_index += len(entity.asym_ids)
+    return build_potential_features(batch, ligand_refs)
 
 
 def ligand_ccd_codes_from_system(
@@ -196,13 +214,13 @@ def ligand_ccd_codes_from_system(
 
 def build_potential_features(
     batch: BatchAllAtomStructure,
-    ligand_ccd_codes: dict[int, str] | None = None,
+    ligand_ccd_codes: Mapping[int, str | Chem.Mol] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Build the feature dictionary consumed by physicality potentials.
 
     Args:
         batch: dense-batched structure (as built by `batch_collate`).
-        ligand_ccd_codes: `{int_asym_id: ccd_3letter_code}` for the ligand
+        ligand_ccd_codes: `{int_asym_id: ccd_3letter_code | Chem.Mol}` for the ligand
             chains in the batch. When non-empty, Tier-2 (RDKit per-residue
             constraints) is populated for each entry; PoseBusters, chiral,
             stereo, and planar potentials then evaluate those constraints.
@@ -286,13 +304,13 @@ def _empty_rdkit_feats(batch: BatchAllAtomStructure) -> dict[str, torch.Tensor]:
 def _compute_rdkit_constraint_feats(
     batch: BatchAllAtomStructure,
     feats: dict[str, torch.Tensor],
-    ligand_ccd_codes: dict[int, str],
+    ligand_ccd_codes: Mapping[int, str | Chem.Mol],
 ) -> dict[str, torch.Tensor]:
     """Build batched RDKit constraints for every non-polymer residue.
 
     Atoms in canonical amino-acid residues are skipped.
     """
-    ccd = _load_ccd()
+    ccd = _load_ccd() if any(isinstance(ref, str) for ref in ligand_ccd_codes.values()) else {}
     B = batch.batch_size
     # Per-atom chain index (asym_id broadcast onto atoms; window-padded -> chain 0).
     atom_chain = batch.upsample_to_atoms(
@@ -304,10 +322,8 @@ def _compute_rdkit_constraint_feats(
     for b in range(B):
         for atom_lo, atom_hi in _iter_ligand_residues(batch, b, atom_chain[b]):
             chain_int = atom_chain[b, atom_lo].item()  # asym_id/chain_idx
-            ccd_code = ligand_ccd_codes.get(chain_int)  # {asym_id/chain_idx: CCD code string}
-            if ccd_code is None:
-                continue
-            ref_mol = ccd.get(ccd_code)  # {ccd_code: rdkit Mol object}
+            ref = ligand_ccd_codes.get(chain_int)
+            ref_mol = ccd.get(ref) if isinstance(ref, str) else ref
             if ref_mol is None:
                 continue
             idx_map = _atom_name_idx_map(batch, b, atom_lo, atom_hi, ref_mol)
