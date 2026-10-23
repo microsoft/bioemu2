@@ -5,6 +5,7 @@ from pathlib import Path
 import mdtraj
 import torch
 from biotite.structure import AtomArray
+from biotite.structure.io import pdbx
 
 from bioemu2.data_interface import System
 from bioemu2.physicality import PhysicalityReport
@@ -40,11 +41,22 @@ def save_mdtraj_cif_frame(
     trajectory: mdtraj.Trajectory,
     path: str | Path,
 ) -> None:
-    """Write a one-frame CIF, preserving topology IDs when every chain has an ID."""
+    """Write a one-frame CIF, preserving topology IDs and marking unknown charges."""
     if trajectory.n_frames != 1:
         raise ValueError("trajectory must contain exactly one frame to save a topology CIF.")
     keep_ids = all(chain.chain_id for chain in trajectory.topology.chains)
     trajectory.save_cif(path, keepIds=keep_ids)
+    cif_file = pdbx.CIFFile.read(str(path))
+    block = cif_file[next(iter(cif_file))]
+    atom_site = block["atom_site"]
+    charges = [
+        "?" if atom.formal_charge is None else str(atom.formal_charge)
+        for atom in trajectory.topology.atoms
+    ]
+    if len(charges) != len(atom_site["id"]):
+        raise ValueError("Trajectory topology and saved CIF atom counts differ.")
+    atom_site["pdbx_formal_charge"] = charges
+    cif_file.write(str(path))
 
 
 def save_frames(

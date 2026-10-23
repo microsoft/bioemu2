@@ -113,17 +113,6 @@ class InferenceModel[TrunkT: TrunkEmbeddings | CPTrunkEmbeddings](Protocol):
         """Compute the sequence-trunk embeddings for a system."""
         ...
 
-    def compute_trunk_embeddings(
-        self,
-        batch: BatchAllAtomStructure,
-    ) -> TrunkT:
-        """Compute trunk embeddings.
-
-        NOTE: Although ``batch`` can contain noisy atom coordinates, this calculation
-        ignores them. Run it once before sampling, not at each diffusion timestep.
-        """
-        ...
-
 
 class _InferenceModel(nn.Module):
     """Wrap ``BioMoaCModel`` as an ``InferenceModel``.
@@ -207,13 +196,13 @@ class _InferenceModel(nn.Module):
             contacts=[] if contacts is None else contacts,
         )
         batch = batch_collate([structure]).to(self.device)
-        embeddings = self.compute_trunk_embeddings(batch)
+        embeddings = self._run_trunk(batch)
         if cache_metadata is not None:
             assert self.embedding_cache_dir is not None  # shut up mypy
             save_embeddings(self.embedding_cache_dir, cache_metadata, embeddings)
         return embeddings
 
-    def compute_trunk_embeddings(
+    def _run_trunk(
         self,
         batch: BatchAllAtomStructure,
     ) -> TrunkEmbeddings:

@@ -151,6 +151,16 @@ def save_structure_to_cif(
     cif_file = pdbx.CIFFile()
     data_block = path.stem
     pdbx.set_structure(cif_file, atoms, data_block=data_block)
+    charges = structure.charge.detach().cpu().numpy()
+    if (
+        charges.shape != (n_atoms,)
+        or not np.all(np.isfinite(charges))
+        or not np.all(charges == np.round(charges))
+    ):
+        raise ValueError("Atom formal charges must be finite integers, one per output atom.")
+    cif_file[data_block]["atom_site"]["pdbx_formal_charge"] = [
+        str(int(charge)) for charge in charges
+    ]
 
     if system is not None and asym_id_to_chain_metadata is not None:
         _add_entity_metadata(cif_file[data_block], system, asym_id_to_chain_metadata)

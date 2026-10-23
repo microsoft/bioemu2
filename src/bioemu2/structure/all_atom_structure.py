@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, BinaryIO, Literal, Self
 import numpy as np
 import torch
 from biotite.structure import AtomArray
-from rdkit import Chem
 
 from bioemu2.conditioning.contact import contact_conditioning_info
 from bioemu2.conditioning.method import SamplingMode, method_types_ids
@@ -358,11 +357,13 @@ def _get_ligand_structure(ligand: Ligand) -> AllAtomStructure:
     from bioemu2.structure.inference_inputs import (  # noqa: PLC0415
         inference_input_structure_from_ccd,
         inference_input_structure_from_inchi,
+        inference_input_structure_from_template_npz,
     )
+    from bioemu2.structure.templates import LigandTemplateCache  # noqa: PLC0415
 
     if ligand.smiles is not None:
-        mol = Chem.MolFromSmiles(ligand.smiles)
-        return inference_input_structure_from_inchi(Chem.MolToInchi(mol))
+        template = LigandTemplateCache.from_smiles(ligand.smiles)
+        return inference_input_structure_from_template_npz(str(template.npz_file))
     elif ligand.inchi is not None:
         return inference_input_structure_from_inchi(ligand.inchi)
     elif ligand.ccd_code is not None:

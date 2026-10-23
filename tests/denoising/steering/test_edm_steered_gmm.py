@@ -20,7 +20,6 @@ carries its own 1-D GMM. We set ``sigma_data=1.0`` so the Karras sigmas are raw.
 from __future__ import annotations
 
 import math
-import os
 from types import SimpleNamespace
 from typing import cast
 
@@ -192,58 +191,13 @@ def neutralized(monkeypatch):
 
 
 def test_unsteered_recovers_gmm(neutralized):
-    """`edm_steered_sampler(steering=None)` reproduces the ground-truth GMM.
-
-    Flip ``make_plot`` to save ``edm_steered_gmm_recovery.png`` next to this
-    file (sampled vs GMM ground truth for each axis)."""
-    make_plot = False  # set True to regenerate the inspection figure
+    """`edm_steered_sampler(steering=None)` reproduces the ground-truth GMM."""
 
     u = _run(multiplicity=4000)
     for axis in range(3):
         ref = _draw_gmm(_MODES, _STD, _WEIGHTS, u.shape[0], seed=100 + axis)
         w1 = _w1(u[:, axis], ref)
         assert w1 < _W1_RECOVER, f"axis {axis}: W1 to GMM = {w1:.3f} (> {_W1_RECOVER})"
-
-    if make_plot:
-        # matplotlib is an optional viz dependency, and the backend must be set before pyplot loads.
-        import matplotlib  # noqa: PLC0415
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt  # noqa: PLC0415
-
-        grid = np.linspace(-7.0, 7.0, 600)
-        p0 = sum(
-            w.item()
-            * np.exp(-0.5 * ((grid - m.item()) / _STD) ** 2)
-            / (_STD * math.sqrt(2 * math.pi))
-            for m, w in zip(_MODES, _WEIGHTS, strict=True)
-        )
-        fig, axes = plt.subplots(1, 3, figsize=(13, 4), sharey=True)
-        for axis, ax in enumerate(axes):
-            ax.hist(
-                u[:, axis].numpy(),
-                bins=60,
-                range=(-7, 7),
-                density=True,
-                alpha=0.5,
-                color="C0",
-                label="sampled",
-            )
-            ax.plot(grid, p0, "k-", lw=1.8, label="ground truth GMM")
-            ax.set_title(
-                f"axis {axis}  (W1={_w1(u[:, axis], _draw_gmm(_MODES, _STD, _WEIGHTS, u.shape[0], seed=100 + axis)):.3f})"
-            )
-            ax.set_xlabel(r"$u_x$")
-            if axis == 0:
-                ax.set_ylabel("density")
-            ax.legend(fontsize=8)
-        fig.suptitle(r"Unsteered $edm\_steered\_sampler$ vs ground-truth GMM")
-        fig.tight_layout()
-        fig.savefig(
-            os.path.join(os.path.dirname(__file__), "edm_steered_gmm_recovery.png"),
-            dpi=130,
-        )
-        plt.close(fig)
 
 
 @pytest.mark.parametrize("micro_batch_size", [1, 3], ids=["mb-1", "mb-3"])
@@ -306,11 +260,7 @@ _W1_TILT = {0.1: 0.35, 1: 0.25, 5: 0.45, 10: 0.55}
 @pytest.mark.parametrize("fk_lambda", [0.1, 1, 5, 10])
 def test_steered_recovers_tilted_gmm(neutralized, fk_lambda):
     """A quadratic-well potential steers the sampler to the analytically tilted
-    GMM ``p0 * exp(-lambda E) / Z``.
-
-    Flip ``make_plot`` to save ``edm_steered_gmm_tilt.png`` next to this file
-    (unsteered vs steered empirical vs analytic tilt)."""
-    make_plot = False  # set True to regenerate the inspection figure
+    GMM ``p0 * exp(-lambda E) / Z``."""
 
     axis, target, beta = 0, 2.0, 1.0
     u_steered = _run(
@@ -323,62 +273,6 @@ def test_steered_recovers_tilted_gmm(neutralized, fk_lambda):
     t_means, t_std, t_weights = _tilted_gmm(target, fk_lambda * beta)
     ref = _draw_gmm(t_means, t_std, t_weights, u_steered.shape[0], seed=200)
     w1 = _w1(u_steered, ref)
-
-    if make_plot:
-        # matplotlib is an optional viz dependency, and the backend must be set before pyplot loads.
-        import matplotlib  # noqa: PLC0415
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt  # noqa: PLC0415
-
-        u_unsteered = _run(multiplicity=32000)[:, axis].numpy()
-        grid = np.linspace(-7.0, 7.0, 600)
-
-        def _density(means, std, weights):
-            return sum(
-                w.item()
-                * np.exp(-0.5 * ((grid - m.item()) / std) ** 2)
-                / (std * math.sqrt(2 * math.pi))
-                for m, w in zip(means, weights, strict=True)
-            )
-
-        plt.figure(figsize=(8, 5))
-        plt.hist(
-            u_unsteered,
-            bins=80,
-            range=(-7, 7),
-            density=True,
-            alpha=0.4,
-            color="C0",
-            label="unsteered samples (ground truth)",
-        )
-        plt.hist(
-            u_steered.numpy(),
-            bins=80,
-            range=(-7, 7),
-            density=True,
-            alpha=0.4,
-            color="C1",
-            label="steered samples",
-        )
-        plt.plot(grid, _density(_MODES, _STD, _WEIGHTS), "k--", lw=1.5, label=r"GMM $p_0$")
-        plt.plot(
-            grid,
-            _density(t_means, t_std, t_weights),
-            "k-",
-            lw=2.0,
-            label=r"analytic tilt $p_0\,e^{-\lambda E}/Z$",
-        )
-        plt.xlabel(r"$u_x = (x_0 - x_1)_x / \sqrt{2}$")
-        plt.ylabel("density")
-        plt.title(rf"edm_steered: unsteered vs steered vs analytic tilt ($\lambda={fk_lambda}$)")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(
-            os.path.join(os.path.dirname(__file__), f"edm_steered_gmm_tilt_{fk_lambda}.png"),
-            dpi=130,
-        )
-        plt.close()
 
     threshold = _W1_TILT[fk_lambda]
     assert w1 < threshold, f"lambda={fk_lambda}: W1 to tilted GMM = {w1:.3f} (> {threshold})"

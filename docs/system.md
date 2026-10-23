@@ -21,6 +21,11 @@
 - optional non-standard covalent bonds; and
 - an optional mapping from canonical chain IDs to author chain IDs.
 
+To start from a working file, browse the
+[example system YAML files](../examples/README.md#example-system-yaml-files).
+They cover a small protein, ligands, disulfide bonds, multiple chains, and
+contacts.
+
 See [`examples/sample_structures.py`](../examples/sample_structures.py) for an
 executable workflow that loads a `System` and uses it for structure prediction
 and equilibrium sampling.
@@ -216,6 +221,20 @@ entities:
     asym_ids: [C]
 ```
 
+Each represented heavy atom, including those in ligands and polymers, supplies
+a formal-charge scalar to the atomistic embedding. CCD ligands (including
+PDB/mmCIF imports) use CCD atom charges, SMILES ligands retain the charges
+specified in the SMILES, and InChI ligands use RDKit's interpretation of the
+supplied InChI (standard InChI can normalize mobile hydrogens). Templates are
+cached separately by input type and chemical string.
+
+Sampled `topology.cif` files record the model-input per-atom charges, including
+zeros, in `_atom_site.pdbx_formal_charge` for retrospective analyses.
+
+The model was trained with ligand charges from CCD-based PDB data and SDF-based
+curated MD data. Even when inference uses the requested formal charges, it may
+not faithfully sample conformations of that protonation or tautomer.
+
 Chain IDs identify instances rather than chemical types. Identical molecules
 can share one entity definition:
 
@@ -300,10 +319,10 @@ uses the following fields:
 | `_atom_site` | `label_entity_id`, `label_asym_id` | Required to associate entities with the label chain IDs present in the atom table. Entity IDs must be integers. |
 | `_atom_site` | `auth_asym_id` | Required for the mapping from label to author chain IDs. Each label chain ID must map to one author chain ID. |
 | `_entity_poly` | `entity_id`, `type`, `pdbx_seq_one_letter_code_can` | Required to import polymer entities: identifies their type and full canonical sequence, including unresolved residues. Supported types are `polypeptide(L)`, `polyribonucleotide`, and `polydeoxyribonucleotide`. |
-| `_entity_poly` | `pdbx_seq_one_letter_code` | Used when canonical sequence length differs from the number of positions in `_entity_poly_seq`, for example when a modified monomer expands to multiple canonical letters. Import raises an error if this alignment is needed but the unexpanded sequence is absent or cannot be aligned. |
+| `_entity_poly` | `pdbx_seq_one_letter_code` | Unexpanded sequence establishes polymer positions and preserves identities of standard parenthesized CCD codes (including DNA). Nonstandard parenthesized codes are imported as modifications, even without monomer tables. When absent, a canonical sequence that disagrees with complete positional records cannot be aligned and raises an error. |
 | `_pdbx_entity_nonpoly` | `entity_id`, `comp_id` | Required to identify non-polymer ligands by CCD code. Water (`HOH`) is omitted. |
 | `_entity_poly_seq` | `entity_id`, `num`, `mon_id` | Optional entity-level monomer identities at 1-based polymer positions, used to identify modified monomers. |
-| `_pdbx_poly_seq_scheme` | `asym_id`, `seq_id`, `mon_id` | Optional chain-level monomer identities at 1-based polymer positions; these take precedence over entity-level monomer identities. |
+| `_pdbx_poly_seq_scheme` | `asym_id`, `seq_id`, `mon_id` | Optional chain-level monomer identities at 1-based polymer positions; these take precedence over entity-level monomer identities. Standard overrides must agree with an aligned canonical residue even when the raw sequence contains a modified CCD code. Chains with differing residue identities are imported separately. |
 | `_pdbx_struct_mod_residue` | `label_asym_id`, `label_seq_id`, `label_comp_id` | Optional explicit modification annotations at 1-based polymer positions. Conflicts with chain-level monomer identities or noncanonical entity-level identities raise an error. |
 
 The fields listed for each optional category are read when that category is
@@ -345,7 +364,8 @@ system = System.from_yaml(Path("system.yaml"))
 system.to_yaml(Path("system-copy.yaml"))
 ```
 
-The files under `bioemu2.paths.EXAMPLES_DIR / "systems"` define example
+The [example system YAML files](../examples/README.md#example-system-yaml-files),
+also available under `bioemu2.paths.EXAMPLES_DIR / "systems"`, define example
 molecular systems; some also specify [contacts](#define-contact-conditioning).
 Use `System.from_yaml()` to load just the molecular composition.
 
@@ -515,6 +535,9 @@ monomers in sampled `topology.cif` files. MDTraj's `residue.index` remains
 zero-based across the whole topology; `save_frames()` preserves the numbering
 of externally supplied trajectories when every chain has a nonempty ID.
 Otherwise, its CIF writer renumbers residues from 1.
+Loading a charged CIF through MDTraj can drop these formal charges; retain the
+original `topology.cif` or `System` if you need to inspect the model-input
+charges later.
 
 For low-level inference code that needs an `AllAtomStructure`, first create a
 `System` (directly, with `System.model_validate()` for a dictionary, or with

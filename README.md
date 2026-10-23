@@ -107,6 +107,10 @@ bioemu2 sample-equilibrium \
   --out outputs/adk
 ```
 
+To sample a system that is not a PDB entry, pass a system YAML file with
+`--system` instead of `--pdb-id`. Start from one of the
+[example system YAML files](examples/README.md#example-system-yaml-files).
+
 Or predict a folded structure from a PDB entry:
 
 ```bash
@@ -267,7 +271,15 @@ Run Current File in Interactive Window** from the Command Palette. Launch the
 context-parallel example with `torchrun` as described in the
 [context-parallel sampling guide](docs/context-parallel-sampling.md#python-api).
 
-To run without VS Code, convert an example with
+The `# %%` markers are ordinary Python comments, so you can also run a
+single-GPU example as a regular script, for example
+`python examples/sample_structures.py`. The script computes the same results and
+writes the same output files as running the cells interactively. 3D structure
+views are not displayed. Matplotlib plots open in separate windows if a
+graphical display is available, and the script continues after you close them.
+
+To run the cells interactively without VS Code, convert an example to a Jupyter
+notebook with
 [Jupytext](https://jupytext.readthedocs.io/) and open it in JupyterLab:
 
 ```bash

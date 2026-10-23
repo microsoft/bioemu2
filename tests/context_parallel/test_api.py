@@ -30,7 +30,7 @@ from bioemu2.context_parallel.distributed.manager import DistributedManager
 from bioemu2.context_parallel.modules.diffusion import CPStaticContext
 from bioemu2.denoising import cp_sync
 from bioemu2.denoising.steering.potentials import BondLengthPotential
-from bioemu2.model import load_model_for_inference
+from bioemu2.model import _InferenceModel, load_model_for_inference
 from bioemu2.sampling import generate_samples
 from bioemu2.structure import AllAtomStructure, BatchAllAtomStructure
 from bioemu2.structure.batch import batch_collate
@@ -131,8 +131,9 @@ def run_api_on_gpu(
     serial_batch = batch_collate([structure], window_size=sampling_batch.coords.shape[1]).to(
         model.device
     )
+    assert isinstance(serial, _InferenceModel)
     with torch.no_grad():
-        serial_trunk = serial.compute_trunk_embeddings(serial_batch)
+        serial_trunk = serial._run_trunk(serial_batch)
     assert isinstance(serial_trunk, SerialTrunkEmbeddings)
     sampling_structure = AllAtomStructure.from_system(system)
     sampling_structure = sampling_structure.replace(

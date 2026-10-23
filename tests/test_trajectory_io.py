@@ -41,8 +41,26 @@ def test_save_trajectory_writes_reloadable_xtc_and_cif(tmp_path) -> None:
     assert atom_site["label_asym_id"].as_array(str).tolist() == expected_chain_ids
     assert atom_site["auth_asym_id"].as_array(str).tolist() == expected_chain_ids
     assert atom_site["label_seq_id"].as_array(str).tolist() == ["40", "80"]
+    assert atom_site["pdbx_formal_charge"].as_array(str).tolist() == ["?", "?"]
     reloaded = mdtraj.load_xtc(str(trajectory_path), top=str(topology_path))
     np.testing.assert_allclose(reloaded.xyz, trajectory.xyz, atol=1e-3)
+
+
+def test_save_mdtraj_cif_preserves_known_charges_and_marks_unknown(tmp_path) -> None:
+    topology = mdtraj.Topology()
+    for chain_id, element, charge in (
+        ("A", mdtraj.element.sodium, 1),
+        ("B", mdtraj.element.chlorine, None),
+    ):
+        chain = topology.add_chain(chain_id=chain_id)
+        residue = topology.add_residue(element.symbol.upper(), chain)
+        topology.add_atom(element.symbol.upper(), element, residue, formal_charge=charge)
+    trajectory = mdtraj.Trajectory(np.zeros((1, 2, 3)), topology)
+
+    save_frames(trajectory, tmp_path)
+
+    atom_site = pdbx.CIFFile.read(str(tmp_path / "topology.cif")).block["atom_site"]
+    assert atom_site["pdbx_formal_charge"].as_array(str).tolist() == ["1", "?"]
 
 
 def test_save_trajectory_rejects_empty_trajectory(tmp_path) -> None:

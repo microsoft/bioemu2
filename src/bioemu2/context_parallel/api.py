@@ -138,7 +138,7 @@ class ModelWithSettings:
         batch = batch.to(self.device)
         batch.update(pad_feats_for_cp(batch, sizes))
         batch.update(pair_feats)
-        return self.compute_trunk_embeddings(batch)
+        return self._run_trunk(batch)
 
     @property
     def edm_schedule(self) -> EDMSchedule:
@@ -148,7 +148,7 @@ class ModelWithSettings:
     def supports_propagation(self) -> bool:
         return False
 
-    def compute_trunk_embeddings(
+    def _run_trunk(
         self,
         batch: BatchAllAtomStructure,
     ) -> CPTrunkEmbeddings:

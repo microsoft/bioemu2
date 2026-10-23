@@ -15,16 +15,16 @@ from .const import PROT_LETTER_TO_TOKEN, Token
 
 logger = logging.getLogger(__name__)
 
-_STANDARD_MONOMERS = {
+_UNKNOWN_MONOMERS = {"protein": "UNK", "rna": "N", "dna": "DN"}
+_STANDARD_MONOMER_TO_LETTER = {
     "protein": {
-        token.name
-        for token in PROT_LETTER_TO_TOKEN.values()
+        token.name: letter
+        for letter, token in PROT_LETTER_TO_TOKEN.items()
         if token not in (Token.UNK_PROT, Token.GAP)
     },
-    "rna": set("ACGU"),
-    "dna": {"DA", "DC", "DG", "DT"},
+    "rna": {letter: letter for letter in "ACGU"},
+    "dna": {f"D{letter}": letter for letter in "ACGT"},
 }
-_UNKNOWN_MONOMERS = {"protein": "UNK", "rna": "N", "dna": "DN"}
 
 
 def _cif_rows(table: dict[str, Any], *columns: str) -> Iterator[tuple[str, ...]]:
@@ -46,27 +46,48 @@ def _positioned_sequence(
     sequence: str,
     raw_sequence: str | None,
     monomers: dict[int, str],
+    entity_type: str,
     unknown_residue: str,
     entity_id: int,
-) -> str:
-    if not monomers or len(sequence) == len(monomers):
-        return sequence
+) -> tuple[str, dict[int, str]]:
+    """Position raw polymer tokens and retain parenthesized monomer identities."""
     if raw_sequence is None:
-        raise ValueError(
-            f"CIF entity {entity_id} has {len(monomers)} polymer positions but "
-            f"{len(sequence)} canonical sequence letters and no unexpanded sequence."
-        )
+        if monomers and (
+            len(sequence) != len(monomers) or set(monomers) != set(range(1, len(sequence) + 1))
+        ):
+            raise ValueError(
+                f"CIF entity {entity_id} has {len(monomers)} polymer positions but "
+                f"{len(sequence)} canonical sequence letters and no unexpanded sequence."
+            )
+        return sequence, {}
     raw_sequence = "".join(raw_sequence.split())
     tokens = re.findall(r"\([^()]+\)|[^()]", raw_sequence)
-    if (
-        "".join(tokens) != raw_sequence
-        or len(tokens) != len(monomers)
-        or set(monomers) != set(range(1, len(tokens) + 1))
+    if "".join(tokens) != raw_sequence or (
+        monomers and set(monomers) != set(range(1, len(tokens) + 1))
     ):
         raise ValueError(
             f"Cannot align CIF entity {entity_id} polymer positions with its sequence."
         )
-    return "".join(unknown_residue if token.startswith("(") else token for token in tokens)
+    raw_monomers: dict[int, str] = {}
+    letters: list[str] = []
+    for position, token in enumerate(tokens, start=1):
+        if token.startswith("("):
+            ccd_code = token[1:-1]
+            _add_monomer(raw_monomers, position, ccd_code, f"entity {entity_id}")
+            letters.append(_STANDARD_MONOMER_TO_LETTER[entity_type].get(ccd_code, unknown_residue))
+        else:
+            letters.append(token)
+        if (
+            len(sequence) == len(tokens)
+            and sequence[position - 1] != unknown_residue
+            and letters[-1] != unknown_residue
+            and sequence[position - 1] != letters[-1]
+        ):
+            raise ValueError(
+                f"CIF entity {entity_id} raw sequence at position {position} "
+                f"disagrees with canonical residue {sequence[position - 1]}."
+            )
+    return "".join(letters), raw_monomers
 
 
 def author_chain_ids_from_cif_file(cif_file: str | Path) -> dict[str, str]:
@@ -130,9 +151,9 @@ def schema_from_cif_file(cif_file: str | Path) -> list[dict[str, dict[str, Any]]
                 entity_poly_table["pdbx_seq_one_letter_code_can"].splitlines()
             )
             if "pdbx_seq_one_letter_code" in entity_poly_table:
-                entity_id_to_raw_sequence[int(entity_poly_table["entity_id"])] = entity_poly_table[
-                    "pdbx_seq_one_letter_code"
-                ]
+                raw_sequence = entity_poly_table["pdbx_seq_one_letter_code"]
+                if raw_sequence not in (".", "?"):
+                    entity_id_to_raw_sequence[int(entity_poly_table["entity_id"])] = raw_sequence
         else:
             for entity_id, entity_type, entity_sequence in _cif_rows(
                 entity_poly_table, "entity_id", "type", "pdbx_seq_one_letter_code_can"
@@ -143,7 +164,8 @@ def schema_from_cif_file(cif_file: str | Path) -> list[dict[str, dict[str, Any]]
                 for entity_id, raw_sequence in _cif_rows(
                     entity_poly_table, "entity_id", "pdbx_seq_one_letter_code"
                 ):
-                    entity_id_to_raw_sequence[int(entity_id)] = raw_sequence
+                    if raw_sequence not in (".", "?"):
+                        entity_id_to_raw_sequence[int(entity_id)] = raw_sequence
     # Check which entity ids are non-polymers (ligands)
     entity_id_to_ccd_code: dict[int, str] = {}
     if "_pdbx_entity_nonpoly" in cif_data:
@@ -233,7 +255,7 @@ def schema_from_cif_file(cif_file: str | Path) -> list[dict[str, dict[str, Any]]
     for entity_id in entity_ids:
         if entity_id in entity_id_to_poly_type:
             poly_type = entity_id_to_poly_type[entity_id]
-            poly_sequence = entity_id_to_poly_sequence[entity_id]
+            canonical_sequence = entity_id_to_poly_sequence[entity_id]
             poly_asym_ids = entity_id_to_label_asym_ids[entity_id]
 
             if poly_type == "polypeptide(L)":  # protein
@@ -248,14 +270,28 @@ def schema_from_cif_file(cif_file: str | Path) -> list[dict[str, dict[str, Any]]
             else:
                 raise ValueError(f"Not recognised polymer type: {poly_type}")
 
-            poly_sequence = _positioned_sequence(
-                poly_sequence,
+            poly_sequence, raw_monomers = _positioned_sequence(
+                canonical_sequence,
                 entity_id_to_raw_sequence.get(entity_id),
                 entity_monomers.get(entity_id, {}),
+                entity_type,
                 unknown_residue,
                 entity_id,
             )
-            grouped_chains: dict[tuple[tuple[int, str], ...], list[str]] = {}
+            if not entity_monomers[entity_id] and entity_id not in entity_id_to_raw_sequence:
+                for asym_id in poly_asym_ids:
+                    if not chain_monomers[asym_id]:
+                        continue
+                    positions = chain_monomers[asym_id]
+                    if set(positions) == set(range(1, max(positions) + 1)):
+                        if len(poly_sequence) != len(positions):
+                            raise ValueError(
+                                f"Cannot align CIF entity {entity_id} polymer positions "
+                                f"with chain {asym_id}."
+                            )
+            for position, ccd_code in raw_monomers.items():
+                _add_monomer(entity_monomers[entity_id], position, ccd_code, f"entity {entity_id}")
+            grouped_chains: dict[tuple[str, tuple[tuple[int, str], ...]], list[str]] = {}
             for asym_id in poly_asym_ids:
                 monomers = {**entity_monomers.get(entity_id, {}), **chain_monomers.get(asym_id, {})}
                 annotations = label_asym_id_to_mods.get(asym_id, {})
@@ -265,8 +301,14 @@ def schema_from_cif_file(cif_file: str | Path) -> list[dict[str, dict[str, Any]]
                         raise ValueError(
                             f"Invalid CIF monomer {ccd_code} at chain {asym_id} position {position}."
                         )
-                    if ccd_code in _STANDARD_MONOMERS[entity_type]:
+                    if ccd_code in _STANDARD_MONOMER_TO_LETTER[entity_type]:
                         sequence_letter = poly_sequence[position - 1]
+                        if (
+                            sequence_letter == unknown_residue
+                            and position in raw_monomers
+                            and len(canonical_sequence) == len(poly_sequence)
+                        ):
+                            sequence_letter = canonical_sequence[position - 1]
                         if sequence_letter != unknown_residue:
                             expected = (
                                 PROT_LETTER_TO_TOKEN[sequence_letter].name
@@ -280,10 +322,7 @@ def schema_from_cif_file(cif_file: str | Path) -> list[dict[str, dict[str, Any]]
                                     f"CIF monomer {ccd_code} at chain {asym_id} position "
                                     f"{position} disagrees with sequence residue {expected}."
                                 )
-                    if (
-                        ccd_code not in _STANDARD_MONOMERS[entity_type]
-                        and ccd_code != _UNKNOWN_MONOMERS[entity_type]
-                    ):
+                    elif ccd_code != _UNKNOWN_MONOMERS[entity_type]:
                         mods[position] = ccd_code
                 for position, ccd_code in annotations.items():
                     if not 1 <= position <= len(poly_sequence):
@@ -304,17 +343,27 @@ def schema_from_cif_file(cif_file: str | Path) -> list[dict[str, dict[str, Any]]
                             f"{mods[position]} and {ccd_code}."
                         )
                     mods[position] = ccd_code
-                grouped_chains.setdefault(tuple(sorted(mods.items())), []).append(asym_id)
+                chain_sequence = list(poly_sequence)
+                for position, ccd_code in chain_monomers[asym_id].items():
+                    if (
+                        position not in mods
+                        and ccd_code in _STANDARD_MONOMER_TO_LETTER[entity_type]
+                    ):
+                        chain_sequence[position - 1] = _STANDARD_MONOMER_TO_LETTER[entity_type][
+                            ccd_code
+                        ]
+                for position in mods:
+                    chain_sequence[position - 1] = unknown_residue
+                grouped_chains.setdefault(
+                    ("".join(chain_sequence), tuple(sorted(mods.items()))), []
+                ).append(asym_id)
 
-            for grouped_mods, asym_ids in grouped_chains.items():
-                sequence = list(poly_sequence)
-                for position, _ in grouped_mods:
-                    sequence[position - 1] = unknown_residue
+            for (positioned_chain_sequence, grouped_mods), asym_ids in grouped_chains.items():
                 schema.append(
                     {
                         entity_type: {
                             "id": asym_ids,
-                            "sequence": "".join(sequence),
+                            "sequence": positioned_chain_sequence,
                             "mods": [
                                 {"res_id": position, "ccd_code": ccd_code}
                                 for position, ccd_code in grouped_mods

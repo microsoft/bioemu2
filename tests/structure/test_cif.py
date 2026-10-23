@@ -167,6 +167,44 @@ def test_cif_mixed_ccd_and_non_ccd_ligands(tmp_path: Path, unknown_label: str):
     assert block["atom_site"]["label_comp_id"].as_array(str).tolist() == ["ZN", "HEM"]
 
 
+def test_cif_writes_model_formal_charges_for_all_atoms(tmp_path: Path) -> None:
+    system = System.from_description(
+        proteins=["A"],
+        ligand_smiles=["[Na+]", "CC(=O)NCC(=O)OP(=O)([O-])O"],
+    )
+    structure = AllAtomStructure.from_system(system)
+    path = tmp_path / "charged.cif"
+    save_structure_to_cif(structure, path, renamed_asym_ids=system.chain_ids)
+
+    atom_site = pdbx.CIFFile.read(str(path)).block["atom_site"]
+    charges = atom_site["pdbx_formal_charge"].as_array(str).tolist()
+    chains = atom_site["label_asym_id"].as_array(str).tolist()
+    elements = atom_site["type_symbol"].as_array(str).tolist()
+
+    assert charges == [str(int(charge)) for charge in structure.charge.tolist()]
+    assert {charge for charge, chain in zip(charges, chains) if chain == "A"} == {"0"}
+    assert [
+        (element, charge)
+        for element, charge, chain in zip(elements, charges, chains)
+        if chain == "B"
+    ] == [("Na", "1")]
+    assert [
+        (element, charge)
+        for element, charge, chain in zip(elements, charges, chains)
+        if chain == "C" and charge != "0"
+    ] == [("O", "-1")]
+
+
+@pytest.mark.parametrize("charge", [0.5, float("nan")])
+def test_cif_rejects_noninteger_or_nonfinite_formal_charge(tmp_path: Path, charge: float) -> None:
+    system = System.from_description(ligand_smiles=["[Na+]"])
+    structure = AllAtomStructure.from_system(system)
+    structure = structure.replace(charge=torch.tensor([charge], dtype=torch.float32))
+
+    with pytest.raises(ValueError, match="finite integers"):
+        save_structure_to_cif(structure, tmp_path / "invalid.cif")
+
+
 @pytest.mark.parametrize("ccd_codes", [["ATP"], ["ZN", "ATP"]])
 @pytest.mark.parametrize("protein_chains", [1, 2])
 def test_ccd_ligands_survive_system_cif_roundtrip(

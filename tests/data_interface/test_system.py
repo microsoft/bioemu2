@@ -145,6 +145,42 @@ A 1 A
 #
 """
 
+_THYMINE_DIMER_CIF = """\
+data_TEST
+loop_
+_entity_poly.entity_id
+_entity_poly.type
+_entity_poly.pdbx_seq_one_letter_code_can
+_entity_poly.pdbx_seq_one_letter_code
+1 'polydeoxyribonucleotide' ATCGGCTTCGCGCA '(DA)(DT)(DC)(DG)(DG)(DC)(WUH)(DC)(DG)(DC)(DG)(DC)(DA)'
+#
+loop_
+_entity_poly_seq.entity_id
+_entity_poly_seq.num
+_entity_poly_seq.mon_id
+1 1 DA
+1 2 DT
+1 3 DC
+1 4 DG
+1 5 DG
+1 6 DC
+1 7 WUH
+1 8 DC
+1 9 DG
+1 10 DC
+1 11 DG
+1 12 DC
+1 13 DA
+#
+loop_
+_atom_site.label_asym_id
+_atom_site.label_entity_id
+_atom_site.auth_asym_id
+C 1 C
+E 1 E
+#
+"""
+
 _AMBIGUOUS_AUTHOR_CIF = """\
 data_TEST
 #
@@ -829,9 +865,21 @@ def test_from_cif_rejects_ambiguous_polymer_monomers(tmp_path: Path):
         System.from_cif(cif_path)
 
 
-def test_from_cif_rejects_monomer_disagreeing_with_canonical_sequence(tmp_path: Path):
+@pytest.mark.parametrize("with_raw_sequence", [False, True])
+def test_from_cif_rejects_monomer_disagreeing_with_canonical_sequence(
+    tmp_path: Path, with_raw_sequence: bool
+):
     cif_path = tmp_path / "mismatched.cif"
-    cif_path.write_text(_ASSEMBLY_MODIFIED_CIF.replace("C 4 PTR", "C 4 ALA"))
+    content = _ASSEMBLY_MODIFIED_CIF.replace("C 4 PTR", "C 4 ALA")
+    if with_raw_sequence:
+        content = content.replace(
+            "_entity_poly.pdbx_seq_one_letter_code_can\n",
+            "_entity_poly.pdbx_seq_one_letter_code_can\n_entity_poly.pdbx_seq_one_letter_code\n",
+        ).replace(
+            "2 'polypeptide(L)' RVIYFVPLNR\n",
+            "2 'polypeptide(L)' RVIYFVPLNR 'RVI(PTR)FVPLNR'\n",
+        )
+    cif_path.write_text(content)
 
     with pytest.raises(ValueError, match="chain C position 4 disagrees with sequence residue TYR"):
         System.from_cif(cif_path)
@@ -872,6 +920,173 @@ A CRO 2
     assert isinstance(protein, Protein)
     assert protein.sequence == "AXD"
     assert protein.mods == [ModifiedResidue(res_id=2, ccd_code="CRO")]
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        pytest.param(
+            _EXPANDED_MODIFIED_CIF.replace("'A(CRO)D'", "'(ALA)(CRO)(ASP)'"),
+            [
+                Protein(
+                    sequence="AXD", asym_ids=["A"], mods=[ModifiedResidue(res_id=2, ccd_code="CRO")]
+                )
+            ],
+            id="parenthesized-standard-protein",
+        ),
+        pytest.param(
+            _EXPANDED_MODIFIED_CIF.replace(
+                """loop_
+_entity_poly_seq.entity_id
+_entity_poly_seq.num
+_entity_poly_seq.mon_id
+1 1 ALA
+1 2 CRO
+1 3 ASP
+#
+""",
+                "",
+            ),
+            [
+                Protein(
+                    sequence="AXD", asym_ids=["A"], mods=[ModifiedResidue(res_id=2, ccd_code="CRO")]
+                )
+            ],
+            id="no-entity-monomer-table",
+        ),
+        pytest.param(
+            _THYMINE_DIMER_CIF,
+            [
+                DNA(
+                    sequence="ATCGGCNCGCGCA",
+                    asym_ids=["C", "E"],
+                    mods=[ModifiedResidue(res_id=7, ccd_code="WUH")],
+                )
+            ],
+            id="8oy5-thymine-dimer",
+        ),
+    ],
+)
+def test_from_cif_decodes_raw_monomers(
+    tmp_path: Path, content: str, expected: list[Protein | DNA]
+) -> None:
+    cif_path = tmp_path / "raw-monomers.cif"
+    cif_path.write_text(content)
+
+    system = System.from_cif(cif_path)
+
+    assert system.entities == expected
+
+
+def test_from_cif_recovers_modification_without_monomer_tables(tmp_path: Path) -> None:
+    content = _EXPANDED_MODIFIED_CIF
+    for category in ("_entity_poly_seq", "_pdbx_poly_seq_scheme"):
+        start = content.index(f"loop_\n{category}.")
+        end = content.index("#\n", start) + 2
+        content = content[:start] + content[end:]
+    cif_path = tmp_path / "raw-only.cif"
+    cif_path.write_text(content)
+
+    assert System.from_cif(cif_path).entities == [
+        Protein(sequence="AXD", asym_ids=["A"], mods=[ModifiedResidue(res_id=2, ccd_code="CRO")])
+    ]
+
+
+def test_from_cif_partial_chain_scheme_uses_raw_positions(tmp_path: Path) -> None:
+    content = _EXPANDED_MODIFIED_CIF
+    start = content.index("loop_\n_entity_poly_seq.")
+    end = content.index("#\n", start) + 2
+    content = content[:start] + content[end:]
+    content = content.replace("A 3 ASP\n", "")
+    cif_path = tmp_path / "partial-chain-scheme.cif"
+    cif_path.write_text(content)
+
+    assert System.from_cif(cif_path).entities == [
+        Protein(sequence="AXD", asym_ids=["A"], mods=[ModifiedResidue(res_id=2, ccd_code="CRO")])
+    ]
+
+
+def test_from_cif_preserves_chain_specific_standard_override(tmp_path: Path) -> None:
+    content = _EXPANDED_MODIFIED_CIF.replace(
+        "A 3 ASP\n#", "A 3 ASP\nB 1 ALA\nB 2 TYR\nB 3 ASP\n#"
+    ).replace("A 1 A\n#", "A 1 A\nB 1 B\n#")
+    cif_path = tmp_path / "override.cif"
+    cif_path.write_text(content)
+
+    assert System.from_cif(cif_path).entities == [
+        Protein(sequence="AXD", asym_ids=["A"], mods=[ModifiedResidue(res_id=2, ccd_code="CRO")]),
+        Protein(sequence="AYD", asym_ids=["B"]),
+    ]
+
+
+def test_from_cif_accepts_standard_override_matching_equal_length_canonical(tmp_path: Path) -> None:
+    content = (
+        _ASSEMBLY_MODIFIED_CIF.replace(
+            "_entity_poly.pdbx_seq_one_letter_code_can\n",
+            "_entity_poly.pdbx_seq_one_letter_code_can\n_entity_poly.pdbx_seq_one_letter_code\n",
+        )
+        .replace(
+            "2 'polypeptide(L)' RVIYFVPLNR\n",
+            "2 'polypeptide(L)' RVIYFVPLNR 'RVI(PTR)FVPLNR'\n",
+        )
+        .replace("C 4 PTR", "C 4 TYR")
+    )
+    cif_path = tmp_path / "matching-override.cif"
+    cif_path.write_text(content)
+
+    assert System.from_cif(cif_path).entities == [
+        Protein(
+            sequence="RVIXFVPLNR", asym_ids=["B"], mods=[ModifiedResidue(res_id=4, ccd_code="PTR")]
+        ),
+        Protein(sequence="RVIYFVPLNR", asym_ids=["C"]),
+    ]
+
+
+@pytest.mark.parametrize("raw", [".", "?"])
+def test_from_cif_missing_raw_sequence_uses_canonical(tmp_path: Path, raw: str) -> None:
+    content = _TEST_CIF.replace(
+        "_entity_poly.pdbx_seq_one_letter_code_can\n",
+        "_entity_poly.pdbx_seq_one_letter_code_can\n_entity_poly.pdbx_seq_one_letter_code\n",
+    ).replace("'polypeptide(L)' ACDE\n", f"'polypeptide(L)' ACDE {raw}\n")
+    cif_path = tmp_path / "missing-raw.cif"
+    cif_path.write_text(content)
+
+    assert System.from_cif(cif_path).entities[0].sequence == "ACDE"
+
+
+@pytest.mark.parametrize(
+    ("content", "error"),
+    [
+        pytest.param(
+            _EXPANDED_MODIFIED_CIF.replace("'A(CRO)D'", "'A(SEP)D'"),
+            "Conflicting CIF monomers at entity 1 position 2",
+            id="raw-monomer-disagrees-with-entity",
+        ),
+        pytest.param(
+            _EXPANDED_MODIFIED_CIF.replace("ATYGD", "AXE"),
+            "raw sequence at position 3 disagrees with canonical residue E",
+            id="raw-standard-disagrees-with-canonical",
+        ),
+        pytest.param(
+            _EXPANDED_MODIFIED_CIF.replace("_entity_poly.pdbx_seq_one_letter_code\n", "")
+            .replace(" 'A(CRO)D'", "")
+            .replace(
+                "loop_\n_entity_poly_seq.entity_id\n_entity_poly_seq.num\n_entity_poly_seq.mon_id\n1 1 ALA\n1 2 CRO\n1 3 ASP\n#\n",
+                "",
+            ),
+            "Cannot align CIF entity 1 polymer positions with chain A",
+            id="expanded-canonical-without-raw-or-entity-monomers",
+        ),
+    ],
+)
+def test_from_cif_rejects_conflicting_raw_sequences(
+    tmp_path: Path, content: str, error: str
+) -> None:
+    cif_path = tmp_path / "conflicting-raw.cif"
+    cif_path.write_text(content)
+
+    with pytest.raises(ValueError, match=error):
+        System.from_cif(cif_path)
 
 
 def test_from_cif_excludes_selected_ligands(cif_path):

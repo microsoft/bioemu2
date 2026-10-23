@@ -9,6 +9,7 @@ from bioemu2.data_interface import DNA, RNA, Ligand, Protein, System
 from bioemu2.denoising.steering.potentials import (
     BondAnglePotential,
     BondLengthPotential,
+    PlanarBondPotential,
 )
 
 
@@ -96,6 +97,97 @@ def test_degenerate_angle_has_finite_energy_and_gradient(first, second):
     )
     assert torch.isfinite(energy).all()
     assert torch.isfinite(torch.autograd.grad(energy.sum(), coords)[0]).all()
+
+
+@pytest.mark.parametrize("cls", [BondLengthPotential, BondAnglePotential])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.int64])
+def test_potentials_reject_unsupported_coordinate_dtypes(
+    cls: type[BondLengthPotential | BondAnglePotential],
+    dtype: torch.dtype,
+) -> None:
+    system = System(entities=[Ligand(smiles="CCO", asym_ids="L")])
+    potential = cls(sigma_tolerance=10.0)
+    potential.prepare(system)
+    coords = torch.zeros(1, system.topology.n_atoms, 3, dtype=dtype)
+    with pytest.raises(ValueError, match=f"require float32 or float64 coordinates; got {dtype}"):
+        potential(coords, t=0.5)
+
+
+@pytest.mark.parametrize("cls", [BondLengthPotential, BondAnglePotential])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_potentials_preserve_supported_coordinate_dtypes(
+    cls: type[BondLengthPotential | BondAnglePotential],
+    dtype: torch.dtype,
+) -> None:
+    potential = cls(sigma_tolerance=10.0)
+    potential.prepare(System(entities=[Ligand(smiles="CCO", asym_ids="L")]))
+    coords = torch.tensor(
+        [[[0.1, 0, 0], [0, 0, 0], [0.1, 0.01, 0]]], dtype=dtype, requires_grad=True
+    )
+    energy = potential(coords, t=0.5)
+    (gradient,) = torch.autograd.grad(energy.sum(), coords)
+    assert energy.dtype == dtype
+    assert energy.item() > 0
+    assert torch.isfinite(gradient).all()
+    assert gradient.abs().max() > 0
+
+
+@pytest.mark.parametrize(
+    "points",
+    [
+        [(0, 1, 0), (0, 0, 0), (0, 0, 0), (1, 1, 0)],
+        [(0, 0, 0), (0, 0, 0), (1, 0, 0), (1, 1, 0)],
+        [(0, 1, 0), (0, 0, 0), (1, 0, 0), (2, 0, 0)],
+    ],
+    ids=["coincident-center", "vanishing-first-plane", "vanishing-second-plane"],
+)
+def test_undefined_dihedral_has_zero_angle_and_coordinate_gradient(points):
+    """Undefined torsions must mask atan2 inputs, not merely its non-finite output."""
+    coords = torch.tensor([points], dtype=torch.float32, requires_grad=True)
+    angle = PlanarBondPotential().compute_variable(coords, torch.tensor([[0], [1], [2], [3]]))
+    (gradient,) = torch.autograd.grad(angle.sum(), coords)
+    torch.testing.assert_close(angle, torch.zeros_like(angle))
+    torch.testing.assert_close(gradient, torch.zeros_like(gradient))
+
+
+def test_mixed_dihedral_batch_preserves_valid_angles_and_gradients() -> None:
+    coords = torch.tensor(
+        [
+            [(0, 1, 0.4), (0, 0, 0), (1, 0, 0), (1, 1, -0.3)],
+            [(0, 1, 0), (0, 0, 0), (0, 0, 0), (1, 1, 0)],
+            [(0, 0, 0), (0, 0, 0), (1, 0, 0), (1, 1, 0)],
+            [(0, 1, 0), (0, 0, 0), (1, 0, 0), (2, 0, 0)],
+        ],
+        dtype=torch.float32,
+        requires_grad=True,
+    )
+    index = torch.tensor([[0], [1], [2], [3]])
+    potential = PlanarBondPotential()
+    valid_coords = coords[:1].detach().clone().requires_grad_(True)
+    expected_angle = potential.compute_variable(valid_coords, index)
+    (expected_gradient,) = torch.autograd.grad(expected_angle.sum(), valid_coords)
+
+    angle = potential.compute_variable(coords, index)
+    (gradient,) = torch.autograd.grad(angle.sum(), coords)
+
+    assert expected_angle.abs().sum() > 0
+    assert expected_gradient.abs().sum() > 0
+    torch.testing.assert_close(angle[:1], expected_angle)
+    torch.testing.assert_close(gradient[:1], expected_gradient)
+    torch.testing.assert_close(angle[1:], torch.zeros_like(angle[1:]))
+    torch.testing.assert_close(gradient[1:], torch.zeros_like(gradient[1:]))
+
+
+def test_nonplanar_dihedral_gradient_matches_finite_differences():
+    """Guarding undefined planes must leave well-defined torsion gradients intact."""
+    coords = torch.tensor(
+        [[(0.0, 1.0, 0.4), (0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 1.0, -0.3)]],
+        dtype=torch.float64,
+        requires_grad=True,
+    )
+    index = torch.tensor([[0], [1], [2], [3]])
+    potential = PlanarBondPotential()
+    assert torch.autograd.gradcheck(lambda x: potential.compute_variable(x, index), (coords,))
 
 
 def test_ligand_angle_fallback_allows_linear_but_penalizes_folded_geometry():

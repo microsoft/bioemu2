@@ -227,7 +227,8 @@ class Potential(ABC):
         ``weight_update="guidance"`` mode.
 
         Args:
-            coords_angstrom: Coordinates in angstroms, shape ``[particles, atoms, 3]``.
+            coords_angstrom: Float32 or float64 coordinates in angstroms,
+                shape ``[particles, atoms, 3]``.
                 Padding may add trailing atoms; use the indices from ``prepare(system)``
                 rather than assuming that every atom is real.
             t: Normalised diffusion time, from 1 at high noise to 0 at the clean endpoint.
@@ -272,6 +273,11 @@ class FeatsPotential(Potential):
 
         ``t`` resolves parameter schedules at normalized diffusion time.
         """
+        if coords_angstrom.dtype not in (torch.float32, torch.float64):
+            raise ValueError(
+                "Steering potentials require float32 or float64 coordinates; "
+                f"got {coords_angstrom.dtype}."
+            )
         parameters = self.compute_parameters(t) or {}
         self.feats = {name: value.to(coords_angstrom.device) for name, value in self.feats.items()}
         # Atom padding is trailing on both sides: truncate (CP pads wider than the
@@ -410,7 +416,9 @@ class DistancePotential(FeatsPotential):
 
 
 class DihedralPotential(FeatsPotential):
-    def compute_variable(self, coords, index):
+    _DIHEDRAL_EPS = 1e-8
+
+    def compute_variable(self, coords: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
         r_ij = coords.index_select(-2, index[0]) - coords.index_select(-2, index[1])
         r_kj = coords.index_select(-2, index[2]) - coords.index_select(-2, index[1])
         r_kl = coords.index_select(-2, index[2]) - coords.index_select(-2, index[3])
@@ -421,13 +429,21 @@ class DihedralPotential(FeatsPotential):
         # atan2 form instead of sign(.) * arccos(clamp(.)): clamping to 1 - 1e-8 is
         # a no-op in float32, so an exactly planar dihedral (phi in {0, pi}) gives
         # arccos'(1) = inf, times sign(0) = 0 -> NaN under autograd. atan2 is exact
-        # there with finite gradients. Still undefined for collinear atoms (both
-        # normals zero).
-        sin_phi = (r_kj * torch.cross(n_ijk, n_jkl, dim=-1)).sum(-1) / torch.linalg.norm(
-            r_kj, dim=-1
+        # there with finite gradients.
+        bond_length = torch.linalg.norm(r_kj, dim=-1)
+        valid = (
+            (bond_length > self._DIHEDRAL_EPS)
+            & (torch.linalg.norm(n_ijk, dim=-1) > self._DIHEDRAL_EPS)
+            & (torch.linalg.norm(n_jkl, dim=-1) > self._DIHEDRAL_EPS)
+        )
+        sin_phi = (r_kj * torch.cross(n_ijk, n_jkl, dim=-1)).sum(-1) / bond_length.clamp_min(
+            self._DIHEDRAL_EPS
         )
         cos_phi = (n_ijk * n_jkl).sum(-1)
-        return torch.atan2(sin_phi, cos_phi)
+        return torch.atan2(
+            torch.where(valid, sin_phi, 0.0),
+            torch.where(valid, cos_phi, 1.0),
+        )
 
 
 class AbsDihedralPotential(DihedralPotential):
@@ -891,7 +907,7 @@ class AnglePotential(FeatsPotential):
 
     _ANGLE_EPS = 1e-6
 
-    def compute_variable(self, coords, index):
+    def compute_variable(self, coords: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
         first = coords.index_select(-2, index[0]) - coords.index_select(-2, index[2])  # [B, P, 3]
         second = coords.index_select(-2, index[1]) - coords.index_select(-2, index[2])  # [B, P, 3]
         # Avoid division by zero when an outer atom coincides with the center.

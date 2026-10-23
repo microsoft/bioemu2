@@ -218,8 +218,27 @@ def test_extract_rdkit_mol_from_structure() -> None:
 def test_structure_has_charge() -> None:
     smiles = "[Na+].[Cl-]"  # Sodium chloride
     structure = AllAtomStructure.from_system(System.from_description(ligand_smiles=[smiles]))
-    # Note: smiles to inchi conversion changes the order of atoms to [Cl-, Na+]
-    assert torch.equal(structure.charge, torch.tensor([-1, 1], dtype=torch.int8))
+    assert torch.equal(structure.charge, torch.tensor([1, -1], dtype=torch.int8))
+
+
+@pytest.mark.parametrize(
+    "smiles",
+    [
+        pytest.param("CC(=O)NCC(=O)OP(=O)([O-])O", id="acyl-phosphate"),
+        pytest.param(
+            "CC(=O)[N-]S(=O)(=O)OC[C@H]1O[C@@H](n2cnc3c(N)ncnc32)[C@H](O)[C@@H]1O",
+            id="acyl-sulfamate",
+        ),
+    ],
+)
+def test_smiles_ligand_retains_per_atom_formal_charge(smiles: str) -> None:
+    molecule = Chem.MolFromSmiles(smiles)
+    assert molecule is not None
+    structure = AllAtomStructure.from_system(System.from_description(ligand_smiles=[smiles]))
+
+    assert structure.num_nodes == molecule.GetNumHeavyAtoms()
+    assert structure.charge.tolist() == [atom.GetFormalCharge() for atom in molecule.GetAtoms()]
+    assert int(structure.charge.sum()) == -1
 
 
 def test_inference_input_structure_from_nucleotide_sequence(test_sequence_rna, test_structure_rna):

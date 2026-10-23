@@ -746,7 +746,7 @@ def test_trunk_embeddings_reused_from_disk_by_new_model(
     assert (entries[0] / "embeddings.pt").is_file()
 
     second = load_model(checkpoint_path=tiny_checkpoint, device="cpu")
-    with patch.object(second, "compute_trunk_embeddings", side_effect=AssertionError("recomputed")):
+    with patch.object(second, "_run_trunk", side_effect=AssertionError("recomputed")):
         actual = second.embed(system, msa=msa, mode="equilibrium")
     for name in TrunkEmbeddings.__dataclass_fields__:
         torch.testing.assert_close(getattr(actual, name), getattr(expected, name), rtol=0, atol=0)
@@ -802,15 +802,14 @@ def test_trunk_cache_recomputes_entry_without_marker(
 ) -> None:
     cache = embeds_cache
     model = load_model(checkpoint_path=tiny_checkpoint, device="cpu")
+    assert isinstance(model, _InferenceModel)
     system = System(entities=[Protein(sequence="AAA", asym_ids=["A"])])
     msa = MSA({"A": ">query\nAAA\n"})
     model.embed(system, msa=msa, mode="equilibrium")
     entry = next(cache.iterdir())
     # An interrupted write leaves embeddings.pt without the metadata marker.
     (entry / "metadata.json").unlink()
-    with patch.object(
-        model, "compute_trunk_embeddings", wraps=model.compute_trunk_embeddings
-    ) as compute:
+    with patch.object(model, "_run_trunk", wraps=model._run_trunk) as compute:
         model.embed(system, msa=msa, mode="equilibrium")
     compute.assert_called_once()
     assert (entry / "metadata.json").is_file()
@@ -836,11 +835,10 @@ def test_trunk_cache_is_disabled_when_environment_variable_is_unset(
     monkeypatch.delenv("BIOEMU2_EMBEDS_CACHE")
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     model = load_model(checkpoint_path=tiny_checkpoint, device="cpu")
+    assert isinstance(model, _InferenceModel)
     system = System(entities=[Protein(sequence="AAA", asym_ids=["A"])])
     msa = MSA({"A": ">query\nAAA\n"})
-    with patch.object(
-        model, "compute_trunk_embeddings", wraps=model.compute_trunk_embeddings
-    ) as compute:
+    with patch.object(model, "_run_trunk", wraps=model._run_trunk) as compute:
         model.embed(system, msa=msa, mode="equilibrium")
         model.embed(system, msa=msa, mode="equilibrium")
     assert compute.call_count == 2
@@ -889,6 +887,7 @@ def test_unwritable_cache_warns_before_computing(
     tiny_checkpoint: Path, embeds_cache: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     model = load_model(checkpoint_path=tiny_checkpoint, device="cpu")
+    assert isinstance(model, _InferenceModel)
     system = System(entities=[Protein(sequence="AAA", asym_ids=["A"])])
     msa = MSA({"A": ">query\nAAA\n"})
     with (
@@ -896,9 +895,7 @@ def test_unwritable_cache_warns_before_computing(
             "bioemu2.embedding_cache.tempfile.TemporaryFile",
             side_effect=PermissionError(errno.EACCES, "denied"),
         ),
-        patch.object(
-            model, "compute_trunk_embeddings", wraps=model.compute_trunk_embeddings
-        ) as compute,
+        patch.object(model, "_run_trunk", wraps=model._run_trunk) as compute,
     ):
         model.embed(system, msa=msa, mode="equilibrium")
     compute.assert_called_once()
@@ -1232,7 +1229,7 @@ def test_fkc_samples_structure_embeddings(tiny_checkpoint: Path) -> None:
     with (
         patch.object(
             model,
-            "compute_trunk_embeddings",
+            "_run_trunk",
             side_effect=AssertionError("Trunk embeddings must be reused"),
         ),
         patch.object(

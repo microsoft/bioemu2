@@ -25,13 +25,14 @@ need:
 """
 
 import functools
+import logging
 import pickle
 from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
 import torch
-from huggingface_hub import hf_hub_download
+from huggingface_hub import hf_hub_download, try_to_load_from_cache
 from torch.nn import functional as F
 from torch.nn.functional import one_hot
 
@@ -47,6 +48,7 @@ from bioemu2.structure import AllAtomStructure, BatchAllAtomStructure, decode_at
 from bioemu2.structure.batch import REQUIRES_MSA_PADDING, batch_collate
 
 _CCD_REPO = "boltz-community/boltz-1"
+logger = logging.getLogger(__name__)
 MAX_ELEMENTS: int = 128
 NUM_BINS_ATOM: int = 64
 NUM_TOKEN_TYPES: int = NUM_TOKENS
@@ -156,8 +158,13 @@ def convert_densebatch_to_potential_features(
 @functools.lru_cache(maxsize=1)
 def _load_ccd() -> dict:
     """Load the cached CCD reference data used for ligand steering."""
-    ccd_path = Path(hf_hub_download(repo_id=_CCD_REPO, filename="ccd.pkl"))
-    with ccd_path.open("rb") as file:
+    ccd_path = try_to_load_from_cache(repo_id=_CCD_REPO, filename="ccd.pkl")
+    if isinstance(ccd_path, str):
+        logger.info("Using cached CCD reference data from %s.", ccd_path)
+    else:
+        ccd_path = hf_hub_download(repo_id=_CCD_REPO, filename="ccd.pkl")
+        logger.info("Downloaded CCD reference data to %s.", ccd_path)
+    with Path(ccd_path).open("rb") as file:
         return pickle.load(file)
 
 

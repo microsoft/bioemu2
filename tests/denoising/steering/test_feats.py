@@ -1,11 +1,46 @@
+import pickle
 from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
+from huggingface_hub import constants
+from rdkit import Chem
 
 from bioemu2.data_interface import Ligand, Protein, System
+from bioemu2.denoising.steering import feats
 from bioemu2.denoising.steering.feats import Tracker, ligand_ccd_codes_from_system
+
+
+@pytest.mark.parametrize("cache_hit", [True, False], ids=["cache-hit", "cache-miss"])
+def test_load_ccd_prefers_cache_and_downloads_on_miss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cache_hit: bool
+):
+    """Use cached CCD without Hub access and download it only on a cache miss."""
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path))
+    repo = tmp_path / "models--boltz-community--boltz-1"
+    revision = "1" * 40
+    cached = repo / "snapshots" / revision / "ccd.pkl"
+    cached.parent.mkdir(parents=True)
+    (repo / "refs").mkdir()
+    (repo / "refs" / "main").write_text(revision)
+    payload = pickle.dumps({"LIG": Chem.MolFromSmiles("CCO")})
+    if cache_hit:
+        cached.write_bytes(payload)
+
+    def download_ccd(**kwargs):
+        assert not cache_hit, "Cached CCD must not contact the Hub"
+        cached.write_bytes(payload)
+        return str(cached)
+
+    monkeypatch.setattr(feats, "hf_hub_download", download_ccd)
+    feats._load_ccd.cache_clear()
+    try:
+        ccd = feats._load_ccd()
+    finally:
+        feats._load_ccd.cache_clear()
+
+    assert ccd["LIG"].GetNumAtoms() == 3
 
 
 def _protein_only_task() -> System:

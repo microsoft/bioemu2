@@ -18,7 +18,7 @@ import requests
 import torch
 from pdbecif.mmcif import CIFWrapper
 from pdbecif.mmcif_io import CifFileReader
-from rdkit.Chem import AddHs, Mol, MolFromInchi, RemoveAllHs, SDMolSupplier
+from rdkit.Chem import AddHs, Mol, MolFromInchi, MolFromSmiles, RemoveAllHs, SDMolSupplier
 from rdkit.Chem.AllChem import (
     CanonicalRankAtoms,
     EmbedMolecule,
@@ -283,8 +283,7 @@ def load_polymer_templates() -> dict[str, AllAtomStructure]:
 
 def _assign_mol_atom_names(mol: Mol) -> None:
     """
-    Assigns canonical atom names to ligand atoms according to inchi
-    atom ordering. Operates in-place.
+    Assign canonical atom names to ligand atoms by RDKit rank. Operates in-place.
     """
     canonical_order = CanonicalRankAtoms(mol)
     element_counter: Counter = Counter()
@@ -419,11 +418,12 @@ class LigandTemplateCache:
 
         LigandTemplateCache.from_ccd("ATP")
         LigandTemplateCache.from_inchi("InChI=1S/...")
+        LigandTemplateCache.from_smiles("CCO")
         LigandTemplateCache.from_sdf("/path/to/ligand.sdf")
     """
 
     source: str
-    kind: Literal["ccd", "inchi", "sdf"]
+    kind: Literal["ccd", "inchi", "smiles", "sdf"]
     max_iters: int = 1000
 
     @classmethod
@@ -433,6 +433,10 @@ class LigandTemplateCache:
     @classmethod
     def from_inchi(cls, inchi: str, *, max_iters: int = 1000) -> "LigandTemplateCache":
         return cls(source=inchi, kind="inchi", max_iters=max_iters)
+
+    @classmethod
+    def from_smiles(cls, smiles: str, *, max_iters: int = 1000) -> "LigandTemplateCache":
+        return cls(source=smiles, kind="smiles", max_iters=max_iters)
 
     @classmethod
     def from_sdf(cls, sdf_path: str, *, max_iters: int = 1000) -> "LigandTemplateCache":
@@ -445,6 +449,11 @@ class LigandTemplateCache:
                 template = template_from_cifwrapper(_load_ccd_cifwrapper(self.source))
             elif self.kind == "inchi":
                 template = _template_from_inchi(self.source, max_iters=self.max_iters)
+            elif self.kind == "smiles":
+                mol = MolFromSmiles(self.source)
+                if mol is None:
+                    raise ValueError(f"Failed to parse SMILES: {self.source}")
+                template = _template_from_rdmol(mol, max_iters=self.max_iters)
             elif self.kind == "sdf":
                 supplier = SDMolSupplier(self.source, removeHs=True)
                 try:
