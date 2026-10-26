@@ -316,6 +316,7 @@ def sample_with_embeddings(
     sampler: Sampler,
     seed: int | None = None,
     progress: bool = True,
+    run_dir: Path | None = None,
     partial_dir: Path | None = None,
 ) -> mdtraj.Trajectory:
     """Sample with precomputed embeddings and an explicit sampler configuration.
@@ -358,6 +359,7 @@ def sample_with_embeddings(
             batch=batch,
             trunk_embeddings=trunk_embeddings,
             progress=progress,
+            run_dir=run_dir,
             partial_dir=partial_dir,
             seed=seed,
         )
