@@ -186,11 +186,20 @@ def edm_steered_sampler(
     scaled_guidance_update = torch.zeros_like(atom_coords, dtype=torch.float32)
     energy_traj: list[torch.Tensor] = []
 
+    guidance_energy_keys: dict[int, str] = {}
     if is_rank0 and tracker is not None:
         for index, p in enumerate(potentials):
             tracker.register(
                 f"{index}_{type(p).__name__}",
                 (len(pairs), shape[0]),
+            )
+            # Energy at each GUIDANCE step, captured from the evaluation the gradient is already taken on,
+            # so it costs nothing extra. The FK metric above is written only when resampling fires, which
+            # never happens for guidance-only runs; this one is written whenever guidance runs.
+            guidance_energy_keys[id(p)] = f"guidance_energy_{index}_{type(p).__name__}"
+            tracker.register(
+                guidance_energy_keys[id(p)],
+                (len(pairs) * max(1, num_gd_steps), shape[0]),
             )
         tracker.register("x_t", (len(pairs), *shape))
         tracker.register("x0_hat", (len(pairs), *shape))
@@ -317,12 +326,18 @@ def edm_steered_sampler(
                     if not active:
                         continue
 
-                    def _grad(coords_chunk, active=active):
+                    captured: dict[int, list[torch.Tensor]] = {}
+
+                    def _grad(coords_chunk, active=active, captured=captured):
                         with torch.enable_grad():
                             c = coords_chunk.detach().requires_grad_(True)
                             energy = c.new_zeros(())
                             for p, gw in active:
-                                energy = energy + gw * p(c, t=t_norm).sum()
+                                e_p = p(c, t=t_norm)
+                                if guidance_energy_keys:
+                                    # Detached, so recording cannot perturb the run.
+                                    captured.setdefault(id(p), []).append(e_p.detach().float())
+                                energy = energy + gw * e_p.sum()
                             # Every active potential can still be inactive on *this*
                             # structure (empty index → detached zeros), leaving energy
                             # graph-free; autograd.grad would raise, so return zeros.
@@ -334,6 +349,15 @@ def edm_steered_sampler(
                     grad = _micro_batch_apply(
                         _grad, coords_unpad + update, denoise_micro_batch_size
                     )
+                    if tracker is not None and captured:
+                        # `_micro_batch_apply` walks dim-0 chunks in order, so concatenating restores
+                        # the sample order.
+                        tracker.log(
+                            {
+                                guidance_energy_keys[key]: torch.cat(values)
+                                for key, values in captured.items()
+                            }
+                        )
                     update = (update - grad).detach()
                 x0_hat = x0_hat + update
                 scaled_guidance_update = update * (
