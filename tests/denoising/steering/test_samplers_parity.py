@@ -209,3 +209,59 @@ def test_guided_fk_sampler_forwards_nothing_the_sampler_rejects():
     fields = {f.name for f in dataclasses.fields(GuidedFKSampler)}
     params = set(inspect.signature(edm_steered_sampler).parameters)
     assert not (fields - params)
+
+
+# The same forwarding question one level up: `sample_with_embeddings` is the exported entry point
+# (`generate_samples` is not in `bioemu2.__all__`), so a `generate_samples` parameter it does not
+# accept is unreachable from the public API.
+
+# Built inside `sample_with_embeddings` rather than taken from its caller: `num_atoms` and `batch`
+# come from `prepare_sampling_inputs`, and `score_model` is its `model` argument under another name.
+_DERIVED_BY_WRAPPER = {"num_atoms", "batch", "score_model"}
+
+
+def test_sample_with_embeddings_exposes_every_generate_samples_parameter():
+    """Fails for a `generate_samples` option the public wrapper cannot pass -- how `run_dir` was stranded."""
+    import inspect
+
+    from bioemu2.sampling import generate_samples, sample_with_embeddings
+
+    inner = set(inspect.signature(generate_samples).parameters)
+    outer = set(inspect.signature(sample_with_embeddings).parameters)
+    assert not (inner - outer - _DERIVED_BY_WRAPPER)
+
+
+def test_sample_with_embeddings_forwards_run_dir(monkeypatch, tmp_path):
+    """And that it is actually passed, not merely accepted."""
+    import torch
+
+    import bioemu2.sampling as sampling
+
+    captured: dict = {}
+
+    def _fake_generate_samples(**kwargs):
+        captured.update(kwargs)
+        return torch.zeros(1, 1, 3)
+
+    monkeypatch.setattr(sampling, "generate_samples", _fake_generate_samples)
+    monkeypatch.setattr(
+        sampling,
+        "prepare_sampling_inputs",
+        lambda system, device: (
+            SimpleNamespace(n_atoms=1),
+            SimpleNamespace(num_tokens=torch.tensor(1)),
+        ),
+    )
+    monkeypatch.setattr(sampling, "warn_batch_size", lambda *a, **k: None)
+    monkeypatch.setattr(sampling, "coords_angstrom_to_trajectory", lambda coords, topology: coords)
+
+    sampling.sample_with_embeddings(
+        cast(object, None),
+        _DUMMY_TRUNK,
+        model=cast(InferenceModel, SimpleNamespace(device="cpu")),
+        num_samples=1,
+        batch_size=1,
+        sampler=cast(object, None),
+        run_dir=tmp_path,
+    )
+    assert captured["run_dir"] == tmp_path
