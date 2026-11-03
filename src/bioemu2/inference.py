@@ -161,12 +161,18 @@ class EmuSession:
         sampler: SamplerPreset | Sampler = "edm",
         seed: int | None = None,
         progress: bool = True,
+        run_dir: Path | None = None,
         partial_dir: Path | None = None,
     ) -> mdtraj.Trajectory:
         """Draw independent structures using this instance's task mode.
 
         ``"structure"`` selects the prediction step scale; ``"equilibrium"``
         selects the equilibrium step scale. A configured sampler is used unchanged.
+
+        With ``run_dir`` set, a steering sampler writes per-step diagnostics to
+        ``run_dir/metrics`` -- ``x_t`` and ``x0_hat`` (saved after guidance) and
+        each potential's energy. Without it no tracker is created and nothing is
+        recorded, which is the default.
         """
         configured_sampler = (
             sampler_from_preset(sampler, mode=self.mode) if isinstance(sampler, str) else sampler
@@ -192,6 +198,7 @@ class EmuSession:
             sampler=configured_sampler,
             seed=seed,
             progress=progress,
+            run_dir=run_dir,
             partial_dir=partial_dir,
         )
 

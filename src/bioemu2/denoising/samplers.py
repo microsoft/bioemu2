@@ -94,6 +94,16 @@ class GuidedFKSampler(Sampler):
         resampling_interval: Steps between systematic resamples. ``None``
             disables both FK weight computation and resampling (guidance only).
         num_gd_steps: Gradient-descent guidance steps on ``x0_hat`` per denoising step.
+        denoise_micro_batch_size: Particles per micro-batch when applying the score
+            model and evaluating potential energies and gradients; ``None`` applies
+            the whole batch at once. Trades wall time for peak memory at large
+            ``batch_size``. Each micro-batch calls a potential separately, so a
+            potential that draws fresh data per call scores each micro-batch on a
+            different draw; that is harmless for a gradient, and harmless for FK
+            weights provided no micro-batch boundary falls inside a resampling group
+            (weights are normalized and resampled within a group only). Keep it a
+            multiple of ``resampling_group_size``; with ``resampling_group_size=None``
+            the whole batch is one group, so any smaller micro-batch splits it.
     """
 
     num_steps: int = 200
@@ -104,6 +114,7 @@ class GuidedFKSampler(Sampler):
     resampling_group_size: int | None = None
     fk_lambda: float = 4.0
     num_gd_steps: int = 20
+    denoise_micro_batch_size: int | None = None
 
     def __post_init__(self) -> None:
         _validate_edm_scales(self.step_scale, self.noise_scale)

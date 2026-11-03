@@ -139,3 +139,129 @@ def test_default_protein_bond_guidance_changes_samples(potential_type):
     unsteered = run([])
     assert torch.isfinite(guided).all()
     assert not torch.allclose(guided, unsteered)
+
+
+# `GuidedFKSampler.__call__` forwards with `**vars(self)`, so a parameter of
+# `edm_steered_sampler` that is not a field of the sampler is unreachable through the class --
+# silently, at its default. These two tests pin that forwarding.
+
+_CALL_SUPPLIED = {"batch", "score_model", "trunk_embeddings", "multiplicity", "tracker"}
+
+# EDM schedule internals that NEITHER sampler class exposes -- `EDMSampler` narrows to the same
+# three knobs (num_steps, step_scale, noise_scale), so this is a deliberately curated surface
+# rather than an oversight. Listed explicitly so the test below still fails for a new STEERING
+# parameter left unexposed, which is the case that silently strands a feature.
+_DELIBERATELY_INTERNAL = {"alignment_reverse_diff", "gamma_0", "gamma_min", "rho"}
+
+
+def _capture_forwarded(monkeypatch):
+    """Replace `edm_steered_sampler` as `samplers` sees it; return the captured kwargs dict."""
+    import bioemu2.denoising.samplers as samplers
+
+    captured: dict = {}
+
+    def _fake(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(coords=None)
+
+    monkeypatch.setattr(samplers, "edm_steered_sampler", _fake)
+    return captured
+
+
+@pytest.mark.parametrize("micro_batch_size", [None, 1, 3])
+def test_guided_fk_sampler_forwards_denoise_micro_batch_size(monkeypatch, micro_batch_size):
+    """Regression: the field was absent, so this argument could only ever be None."""
+    captured = _capture_forwarded(monkeypatch)
+    sampler = GuidedFKSampler(
+        potentials=[],
+        resampling_interval=None,
+        denoise_micro_batch_size=micro_batch_size,
+    )
+    sampler(
+        batch=cast(object, None),
+        score_model=cast(InferenceModel, _GaussianScoreModel()),
+        trunk_embeddings=_DUMMY_TRUNK,
+        batch_size=4,
+    )
+    assert captured["denoise_micro_batch_size"] == micro_batch_size
+
+
+def test_guided_fk_sampler_exposes_every_sampler_parameter():
+    """Every `edm_steered_sampler` parameter is supplied by `__call__`, a field, or deliberately internal.
+
+    The invariant that was broken, stated generally: a parameter in none of those three groups is
+    unreachable through the class and pinned at its default, with nothing raising to say so. Adding
+    one to `edm_steered_sampler` without a field here fails this test.
+    """
+    import dataclasses
+    import inspect
+
+    fields = {f.name for f in dataclasses.fields(GuidedFKSampler)}
+    params = set(inspect.signature(edm_steered_sampler).parameters)
+    assert not (params - _CALL_SUPPLIED - _DELIBERATELY_INTERNAL - fields)
+
+
+def test_guided_fk_sampler_forwards_nothing_the_sampler_rejects():
+    """The converse: a field the function does not accept is a TypeError at call time."""
+    import dataclasses
+    import inspect
+
+    fields = {f.name for f in dataclasses.fields(GuidedFKSampler)}
+    params = set(inspect.signature(edm_steered_sampler).parameters)
+    assert not (fields - params)
+
+
+# The same forwarding question one level up: `sample_with_embeddings` is the exported entry point
+# (`generate_samples` is not in `bioemu2.__all__`), so a `generate_samples` parameter it does not
+# accept is unreachable from the public API.
+
+# Built inside `sample_with_embeddings` rather than taken from its caller: `num_atoms` and `batch`
+# come from `prepare_sampling_inputs`, and `score_model` is its `model` argument under another name.
+_DERIVED_BY_WRAPPER = {"num_atoms", "batch", "score_model"}
+
+
+def test_sample_with_embeddings_exposes_every_generate_samples_parameter():
+    """Fails for a `generate_samples` option the public wrapper cannot pass -- how `run_dir` was stranded."""
+    import inspect
+
+    from bioemu2.sampling import generate_samples, sample_with_embeddings
+
+    inner = set(inspect.signature(generate_samples).parameters)
+    outer = set(inspect.signature(sample_with_embeddings).parameters)
+    assert not (inner - outer - _DERIVED_BY_WRAPPER)
+
+
+def test_sample_with_embeddings_forwards_run_dir(monkeypatch, tmp_path):
+    """And that it is actually passed, not merely accepted."""
+    import torch
+
+    import bioemu2.sampling as sampling
+
+    captured: dict = {}
+
+    def _fake_generate_samples(**kwargs):
+        captured.update(kwargs)
+        return torch.zeros(1, 1, 3)
+
+    monkeypatch.setattr(sampling, "generate_samples", _fake_generate_samples)
+    monkeypatch.setattr(
+        sampling,
+        "prepare_sampling_inputs",
+        lambda system, device: (
+            SimpleNamespace(n_atoms=1),
+            SimpleNamespace(num_tokens=torch.tensor(1)),
+        ),
+    )
+    monkeypatch.setattr(sampling, "warn_batch_size", lambda *a, **k: None)
+    monkeypatch.setattr(sampling, "coords_angstrom_to_trajectory", lambda coords, topology: coords)
+
+    sampling.sample_with_embeddings(
+        cast(object, None),
+        _DUMMY_TRUNK,
+        model=cast(InferenceModel, SimpleNamespace(device="cpu")),
+        num_samples=1,
+        batch_size=1,
+        sampler=cast(object, None),
+        run_dir=tmp_path,
+    )
+    assert captured["run_dir"] == tmp_path
