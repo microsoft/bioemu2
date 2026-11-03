@@ -253,6 +253,69 @@ def test_tracking_records_values_without_changing_sampling(neutralized, tmp_path
     np.testing.assert_array_equal(energy[len(energy_steps) :], 0)
 
 
+def test_guidance_energy_recorded_for_each_potential(neutralized, tmp_path):
+    """Each potential's energy is recorded at every guidance step, separately.
+
+    The FK metric beside it is written only when resampling fires, so a guidance-only run --
+    ``resampling_interval=None``, which is how steering without FK is configured -- leaves it
+    empty. This is that gap, and it costs nothing extra: the value comes from the evaluation the
+    gradient is already being taken on.
+    """
+    kwargs = dict(
+        multiplicity=3,
+        num_steps=4,
+        potentials=[
+            _AxisWell(axis=0, target=2.0, beta=1.0, guidance_weight=0.5),
+            _AxisWell(axis=1, target=-1.0, beta=2.0, guidance_weight=0.5),
+        ],
+        resampling_interval=None,
+        num_gd_steps=2,
+    )
+    untracked = _run(**kwargs)
+    untracked_rng = torch.get_rng_state()
+    tracked = _run(tracker=Tracker(tmp_path / "metrics"), **kwargs)
+    torch.testing.assert_close(tracked, untracked, rtol=0, atol=0)
+    torch.testing.assert_close(torch.get_rng_state(), untracked_rng, rtol=0, atol=0)
+
+    metrics = tmp_path / "metrics"
+    # The gap: resampling never fires, so the FK metric never receives a value.
+    np.testing.assert_array_equal(np.load(metrics / "0__AxisWell.npy"), 0)
+
+    # Guidance is skipped on the last step, so the registered array runs short of its own length.
+    written = (kwargs["num_steps"] - 1) * kwargs["num_gd_steps"]
+    recorded = [np.load(metrics / f"guidance_energy_{i}__AxisWell.npy") for i in range(2)]
+    for energy in recorded:
+        assert energy.shape == (
+            kwargs["num_steps"] * kwargs["num_gd_steps"],
+            kwargs["multiplicity"],
+        )
+        assert (energy[:written] > 0).all()  # quadratic wells, never sitting on their target
+        np.testing.assert_array_equal(energy[written:], 0)
+    # Per POTENTIAL, not one series shared by both.
+    assert not np.allclose(recorded[0], recorded[1])
+
+
+def test_guidance_energy_order_survives_micro_batching(neutralized, tmp_path):
+    """Micro-batching splits the energy evaluation into dim-0 chunks that are concatenated back.
+
+    Sample order is the one thing that plumbing can get wrong without raising: the energies would
+    still be the right values, attributed to the wrong structures.
+    """
+    kwargs = dict(
+        multiplicity=4,
+        num_steps=4,
+        potentials=[_AxisWell(axis=0, target=2.0, beta=1.0, guidance_weight=0.5)],
+        resampling_interval=None,
+        num_gd_steps=2,
+    )
+    _run(tracker=Tracker(tmp_path / "whole"), **kwargs)
+    _run(tracker=Tracker(tmp_path / "chunked"), denoise_micro_batch_size=1, **kwargs)
+    name = "guidance_energy_0__AxisWell.npy"
+    np.testing.assert_array_equal(
+        np.load(tmp_path / "whole" / name), np.load(tmp_path / "chunked" / name)
+    )
+
+
 _W1_RECOVER = 0.25
 _W1_TILT = {0.1: 0.35, 1: 0.25, 5: 0.45, 10: 0.55}
 
