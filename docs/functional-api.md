@@ -46,13 +46,13 @@ including frames that fail the checks, to `samples.xtc`, together with
 selects the check thresholds (default `"high_quality"`). Without `output_dir`,
 they return frames without checking or saving them.
 
-Long sampling runs can be interrupted, for example when a job is pre-empted.
-With `output_dir`, completed batches are kept in `<output_dir>/partial` until
-all outputs are saved. After a failure, repeat the call with identical inputs,
-settings, and output directory to generate only the unfinished batches; use
-one process per output directory. To choose the directory yourself, pass
-`partial_dir`, which `sample_with_embeddings()` also accepts. A directory you
-supply is not removed automatically. For seeds and retry rules, see
+Every sampling and propagation function, including `sample_with_embeddings()`,
+`propagate()`, and `simulate_trajectory()`, takes the same `output_dir`.
+`simulate_trajectory()` writes one `samples_NNNNNN.xtc` and
+`physicality_NNNNNN.json` per trajectory instead of `samples.xtc` and
+`physicality.json`. Completed batches are kept in `<output_dir>/batches`; calling
+again with the same output directory continues from them. Context-parallel
+sampling keeps no batches. See
 [resume an interrupted sampling run](sampling.md#resume-an-interrupted-sampling-run).
 
 ### Customize every step with the low-level Python API

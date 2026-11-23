@@ -10,7 +10,8 @@
 #
 # The example compares ordinary sampling with guided sampling and plots the
 # distance distributions. It generates many structures so that the comparison
-# is meaningful.
+# is meaningful. One run took about 93 minutes on an RTX A6000 and used about
+# 36 GiB of GPU memory with `batch_size` 250.
 #
 # For installation and hardware requirements, see the
 # [notebook quickstart](https://github.com/microsoft/bioemu2/blob/main/README.md#notebook-quickstart).
@@ -87,16 +88,21 @@ class TerminiTargetExpPotential(Potential):
 # First sample without steering. Reweighting those samples by the potential's
 # Boltzmann factor gives the target tilted distribution without new sampling.
 # Then sample with `FKCSampler`, which should reproduce that tilted distribution.
+#
+# Each call saves its results and completed batches in its `output_dir`. If
+# sampling is interrupted, rerun the cell: completed batches are reused.
 
 # %%
 NUM_TILT_SAMPLES = 2000
 TILT_BATCH_SIZE = 250
+tilt_run_dir = Path("outputs/tilt_a_sample_distribution_with_steering")
 
 chignolin_unsteered_large: mdtraj.Trajectory = emu.sample(
     num_samples=NUM_TILT_SAMPLES,
     batch_size=TILT_BATCH_SIZE,
     sampler=EDMSampler(),
     seed=42,
+    output_dir=tilt_run_dir / "unsteered",
 )
 unsteered_d: np.ndarray = terminal_distances_angstrom(chignolin_unsteered_large)
 
@@ -123,6 +129,7 @@ chignolin_tilt_steered: mdtraj.Trajectory = emu.sample(
     batch_size=TILT_BATCH_SIZE,
     sampler=guidance_sampler,
     seed=42,
+    output_dir=tilt_run_dir / "steered",
 )
 steered_d: np.ndarray = terminal_distances_angstrom(chignolin_tilt_steered)
 
@@ -179,7 +186,6 @@ fig
 # Save the distances, reference weights, and plot.
 
 # %%
-tilt_run_dir = Path("outputs/tilt_a_sample_distribution_with_steering")
 tilt_run_dir.mkdir(parents=True, exist_ok=True)
 np.savez(tilt_run_dir / "unsteered.npz", distances=unsteered_d, tilt_weights=tilt_weights)
 np.savez(tilt_run_dir / "steered.npz", distances=steered_d)

@@ -1,6 +1,6 @@
 # Portions adapted from Boltz. See NOTICES.md and licenses/LICENSE.BOLTZ-MIT.
 
-"""EDM noise schedule and Heun sampler for diffusion-based structure sampling."""
+"""EDM noise schedule and sampler for diffusion-based structure sampling."""
 
 import math
 from dataclasses import replace
@@ -28,7 +28,7 @@ def edm_sample_schedule(
     sigma_data: float = 16.0,  # angstrom
     rho: int = 7,
 ) -> torch.Tensor:
-    """Sigma schedule for sampling with EDM and Heun sampler; see Karras et al.
+    """Sigma schedule for EDM sampling; see Karras et al.
 
     Args:
         num_steps: Number of sampling steps.
@@ -75,7 +75,7 @@ def edm_sampler(
     multiplicity: int = 1,
     alignment_reverse_diff: bool = True,
 ) -> BatchAllAtomStructure:
-    """Sample from the score model using the EDM schedule and Heun sampler of Karras et al.
+    """Sample from the score model using the EDM schedule of Karras et al.
 
     Args:
         batch: Current batch.
@@ -90,8 +90,8 @@ def edm_sampler(
         gamma_min: Minimum value for determining gamma in Karras et al. Algorithm 2.
         multiplicity: Number of times structure in batch should be repeated for structure module
           operations.
-        alignment_reverse_diff: Align noisy coordinates with denoised coordinates before Heun
-          interpolation.
+        alignment_reverse_diff: Align noisy coordinates with denoised coordinates before each
+          update.
 
     Returns:
         Sampled structures.
@@ -166,7 +166,7 @@ def edm_sampler(
             ).denoised_coords
 
         if alignment_reverse_diff:
-            # Align noisy coordinates to denoised coordinates before Heun update.
+            # Align noisy coordinates to denoised coordinates before the update.
             with torch.autocast("cuda", enabled=False):
                 atom_coords_noisy, _, _ = weighted_rigid_align(
                     atom_coords_noisy.float(),

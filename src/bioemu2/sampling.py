@@ -1,7 +1,8 @@
 """Structure prediction and equilibrium sampling with physicality filtering."""
 
+import json
 import logging
-import shutil
+import math
 from collections import Counter
 from collections.abc import Collection, Generator, Sequence
 from contextlib import contextmanager
@@ -20,6 +21,7 @@ from bioemu2.data_interface import Contact, System
 from bioemu2.denoising.samplers import EDMSampler, FKCSampler, GuidedFKSampler, Sampler
 from bioemu2.denoising.steering.feats import Tracker
 from bioemu2.denoising.steering.potentials import Potential
+from bioemu2.embedding_cache import contacts_digest
 from bioemu2.model import InferenceModel
 from bioemu2.msa.alignment import get_msa
 from bioemu2.physicality import (
@@ -42,6 +44,7 @@ from bioemu2.trajectory_io import coords_angstrom_to_trajectory
 logger = logging.getLogger(__name__)
 
 SamplerPreset = Literal["edm", "edm_gd", "edm_fk", "edm_fkc"]
+BATCH_DIR = "batches"
 
 
 def sampler_from_preset(
@@ -106,6 +109,73 @@ def warn_batch_size(num_tokens: int, num_samples: int, batch_size: int) -> None:
     )
 
 
+def _check_resumption(
+    batch_dir: Path,
+    seed: int | None,
+    num_samples: int,
+    batch_size: int,
+    system: System,
+    sampler: Sampler,
+    mode: SamplingMode,
+    contacts: list[Contact] | None,
+    score_model: InferenceModel[TrunkEmbeddings],
+    dt: list[float],
+) -> int:
+    """Check this run against ``batch_dir/run.json`` and count completed batches.
+
+    ``run.json`` is written only while no batch is completed, so a retry never
+    rewrites the record its batches depend on.
+    ``seed`` is recorded as given, ``None`` for an unseeded run.
+    Raises ``ValueError`` if ``batch_dir`` holds completed batches from a different
+    system, mode, contacts, seed, number of samples, batch size, sampler type, ``num_steps``,
+    ``step_scale``, checkpoint or lag time ``dt``.
+    """
+    run_json = batch_dir / "run.json"
+    saved = (
+        json.loads(run_json.read_text(encoding="utf-8"))
+        if run_json.is_file() and any(batch_dir.glob("samples_*.done"))
+        else {}
+    )
+    # ponytail: plain inputs only; potentials, precision and other sampler settings are not checked.
+    record = {
+        "system": system.model_dump(mode="json", exclude_none=True),
+        "mode": mode,
+        "contacts": contacts_digest(contacts),
+        "seed": None if seed is None else int(seed),
+        "num_samples": int(num_samples),
+        "batch_size": int(batch_size),
+        "num_steps": sampler.num_steps,
+        "sampler": type(sampler).__name__,
+        "step_scale": getattr(sampler, "step_scale", None),
+        "model": getattr(score_model, "model_fingerprint", None) or None,
+        "dt": dt,
+    }
+
+    done_batches = len(list(batch_dir.glob("samples_*.done")))
+    if done_batches and not run_json.is_file():
+        raise ValueError(
+            f"{batch_dir} holds batches but no run.json; use a new output directory or delete it."
+        )
+    changed = [key for key in record if saved.get(key) != record[key]]
+    if done_batches and changed:
+        raise ValueError(
+            f"{batch_dir} holds batches with a different {', '.join(changed)}; "
+            "use a new output directory or delete it."
+        )
+    if done_batches:
+        logger.warning(
+            "Found %d completed batches in %s; continuing. Potentials, precision and other "
+            "sampler settings are not checked.",
+            done_batches,
+            batch_dir,
+        )
+    else:
+        # Rewrite only while no batch depends on run.json; with batches it already matches.
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        run_json.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+    return done_batches
+
+
 def generate_samples(
     num_samples: int,
     batch_size: int,
@@ -117,36 +187,61 @@ def generate_samples(
     trunk_embeddings: TrunkEmbeddings,
     progress: bool = True,
     run_dir: Path | None = None,
-    partial_dir: Path | None = None,
+    batch_dir: Path | None = None,
     seed: int | None = None,
+    mode: SamplingMode = "equilibrium",
+    contacts: list[Contact] | None = None,
 ) -> torch.Tensor:
-    """Run each batch and return centered coordinates in angstroms.
+    """Run each batch and return centered coordinates in angstroms on the CPU.
 
     With ``run_dir`` set, steered samplers write diagnostics in ``run_dir/metrics``
     with zero-based, end-exclusive sample ranges appended to the filenames, such
     as ``x0_000000-000002.npy``. A fresh Tracker is created only for batches
-    that need sampling. Completed batches loaded from ``partial_dir`` leave
+    that need sampling. Completed batches loaded from ``batch_dir`` leave
     existing diagnostics untouched and do not reconstruct missing diagnostics.
+
+    Batch ``i`` uses ``seed + i``. With ``batch_dir``, completed batches are
+    saved as ``samples_{start}-{stop}.npy`` and reused. ``batch_dir/run.json``
+    records the inputs checked by ``_check_resumption``, including ``mode`` and
+    ``contacts``; a ``ValueError`` is raised if ``batch_dir`` holds batches from
+    different values.
+    Without ``seed``, a seed is drawn from the global RNG on every call.
+
+    A ``batch`` with one conditioning frame per sample (propagation) is sliced
+    per batch.
     """
-    partial_coords: list[torch.Tensor] = []
-    if partial_dir is not None:
-        partial_dir.mkdir(parents=True, exist_ok=True)
+    samples: list[torch.Tensor] = []
+    done_batches = 0
+    if batch_dir is not None:
+        done_batches = _check_resumption(
+            batch_dir=batch_dir,
+            seed=seed,
+            num_samples=num_samples,
+            batch_size=batch_size,
+            system=system,
+            sampler=sampler,
+            mode=mode,
+            contacts=contacts,
+            score_model=score_model,
+            dt=batch.dt.unique().tolist(),
+        )
+    if seed is None:
+        # An unseeded run has nothing to reproduce; a fresh seed keeps new batches independent.
+        seed = int(torch.randint(2**31, ()))
     for potential in getattr(sampler, "potentials", ()):
         potential.prepare(system)
-    for start in trange(0, num_samples, batch_size, disable=not progress, desc="Sampling"):
+    num_batches = math.ceil(num_samples / batch_size)
+    # The bar starts at done_batches of num_batches.
+    for batch_id in trange(
+        done_batches,
+        num_batches,
+        initial=done_batches,
+        total=num_batches,
+        disable=not progress,
+        desc="Sampling",
+    ):
+        start = batch_id * batch_size
         size = min(batch_size, num_samples - start)
-        batch_seed = seed + start // batch_size if seed is not None else None
-        if partial_dir is not None:
-            batch_path = partial_dir / f"samples_{start:06d}-{start + size:06d}.npy"
-            completion_marker = batch_path.with_suffix(".done")
-            if batch_path.is_file() and completion_marker.is_file():
-                partial_coords.append(
-                    torch.from_numpy(np.load(batch_path, allow_pickle=False)).to(
-                        batch.coords.device
-                    )
-                )
-                continue
-            completion_marker.unlink(missing_ok=True)
         tracker = (
             Tracker(
                 run_dir / "metrics",
@@ -155,9 +250,17 @@ def generate_samples(
             if run_dir is not None
             else None
         )
-        with rng_seed(batch_seed), torch.no_grad():
+        sample_batch = batch
+        if batch.is_dynamics_conditioned.any():
+            rows = slice(start, start + size)
+            sample_batch = batch.replace(
+                coords_cond=batch.coords_cond[rows],
+                is_dynamics_conditioned=batch.is_dynamics_conditioned[:, rows],
+                dt=batch.dt[:, rows],
+            )
+        with rng_seed(seed + batch_id), torch.no_grad():
             sampled = sampler(
-                batch=batch,
+                batch=sample_batch,
                 score_model=score_model,
                 trunk_embeddings=trunk_embeddings,
                 batch_size=size,
@@ -167,13 +270,20 @@ def generate_samples(
         xyz = sampled.coords.view(size, -1, 3)
         xyz = xyz[:, :num_atoms]
         xyz = xyz - xyz.mean(dim=1, keepdim=True)
-        if partial_dir is not None:
-            np.save(batch_path, xyz.cpu().numpy(), allow_pickle=False)
+        if batch_dir is None:
+            samples.append(xyz.cpu())
+        else:
+            path = batch_dir / f"samples_{start:06d}-{start + size:06d}.npy"
+            np.save(path, xyz.cpu().numpy(), allow_pickle=False)
             # An interrupted write leaves no marker, so the batch is regenerated on retry.
-            completion_marker.touch()
-        partial_coords.append(xyz)
+            path.with_suffix(".done").touch()
 
-    return torch.cat(partial_coords)
+    if batch_dir is not None:
+        # Every batch is on disk now, including those finished before this call.
+        for start in range(0, num_samples, batch_size):
+            path = batch_dir / f"samples_{start:06d}-{min(start + batch_size, num_samples):06d}.npy"
+            samples.append(torch.from_numpy(np.load(path, allow_pickle=False)))
+    return torch.cat(samples)
 
 
 def save_topology_cif(
@@ -316,12 +426,15 @@ def sample_with_embeddings(
     sampler: Sampler,
     seed: int | None = None,
     progress: bool = True,
-    partial_dir: Path | None = None,
+    output_dir: str | Path | None = None,
+    physicality_mode: PhysicalityFilterMode | str = PhysicalityFilterMode.HIGH_QUALITY,
+    mode: SamplingMode = "equilibrium",
+    contacts: list[Contact] | None = None,
 ) -> mdtraj.Trajectory:
     """Sample with precomputed embeddings and an explicit sampler configuration.
 
     The sampler configuration is used unchanged. All generated frames are
-    returned; call ``check_physicality`` separately to check their geometry.
+    returned. Without ``output_dir`` nothing is checked or written to disk.
 
     Args:
         system: Molecular system represented by ``trunk_embeddings``.
@@ -330,79 +443,49 @@ def sample_with_embeddings(
         num_samples: Number of output conformations.
         batch_size: Maximum samples generated per denoising call.
         sampler: Sampling algorithm used unchanged; steering potentials are configured on it.
-        seed: Optional Torch random seed. When supplied, batch ``i`` uses ``seed + i``
-            for reproducible retries. Otherwise, sampling does not reseed the RNG,
-            and retries need not match an uninterrupted run.
+        seed: Optional Torch random seed; batch ``i`` uses ``seed + i``. Without it,
+            a seed is drawn from the global RNG.
         progress: Whether to display sampling progress.
-        partial_dir: Optional directory for saving and reusing completed raw batches.
-            Keep inputs and settings fixed and use only one writer per directory.
-            Retained after return; remove it after saving the returned trajectory.
+        output_dir: Optional directory for samples.xtc, topology.cif, system.yaml and
+            physicality.json. Raw batches are kept in ``output_dir/batches``; a rerun
+            with the same directory continues from them after checking the inputs
+            recorded in ``run.json`` (see docs/sampling.md).
+            Use only one writer per directory.
+        physicality_mode: Check thresholds for saved outputs; no frames are removed.
+        mode: Task mode of ``trunk_embeddings``, recorded in system.yaml.
+        contacts: Contacts used for ``trunk_embeddings``, recorded in system.yaml.
 
     Returns:
         Sampled trajectory in nanometers.
+
+    Raises:
+        ValueError: If ``output_dir/batches`` holds completed batches with
+            different inputs recorded in ``run.json``.
     """
     if batch_size is None:
         # For batch-size tuning, see docs/speed-and-capacity.md.
         batch_size = num_samples
+    out = Path(output_dir) if output_dir is not None else None
+    physicality_mode = normalize_physicality_mode(physicality_mode)
     topology, batch = prepare_sampling_inputs(system, device=model.device)
     warn_batch_size(int(batch.num_tokens.item()), num_samples, batch_size)
 
-    with rng_seed(seed):
-        coords = generate_samples(
-            num_samples=num_samples,
-            batch_size=batch_size,
-            score_model=model,
-            sampler=sampler,
-            num_atoms=topology.n_atoms,
-            system=system,
-            batch=batch,
-            trunk_embeddings=trunk_embeddings,
-            progress=progress,
-            partial_dir=partial_dir,
-            seed=seed,
-        )
-    trajectory = coords_angstrom_to_trajectory(coords, topology)
-    return trajectory
-
-
-def _embed_and_sample(
-    system: System,
-    *,
-    model: InferenceModel[TrunkEmbeddings],
-    mode: SamplingMode,
-    contacts: list[Contact] | None,
-    num_samples: int,
-    batch_size: int | None,
-    sampler: SamplerPreset,
-    num_steps: int | None,
-    potentials: Sequence[Potential] | None,
-    seed: int | None,
-    progress: bool,
-    partial_dir: Path | None,
-    output_dir: str | Path | None,
-    physicality_mode: PhysicalityFilterMode | str,
-) -> mdtraj.Trajectory:
-    physicality_mode = normalize_physicality_mode(physicality_mode)
-    configured_sampler = sampler_from_preset(
-        sampler, mode=mode, num_steps=num_steps, potentials=potentials
-    )
-    out = Path(output_dir) if output_dir is not None else None
-    managed_partial_dir = out / "partial" if out is not None and partial_dir is None else None
-    if out is not None:
-        write_sampling_system(system, mode=mode, contacts=contacts, out=out)
-    msa = get_msa(system)
-    trunk_embeddings = model.embed(system, msa=msa, mode=mode, contacts=contacts)
-    trajectory = sample_with_embeddings(
-        system,
-        trunk_embeddings,
-        model=model,
+    coords = generate_samples(
         num_samples=num_samples,
         batch_size=batch_size,
-        sampler=configured_sampler,
-        seed=seed,
+        score_model=model,
+        sampler=sampler,
+        num_atoms=topology.n_atoms,
+        system=system,
+        batch=batch,
+        trunk_embeddings=trunk_embeddings,
         progress=progress,
-        partial_dir=managed_partial_dir if managed_partial_dir is not None else partial_dir,
+        batch_dir=out / BATCH_DIR if out is not None else None,
+        seed=seed,
+        mode=mode,
+        contacts=contacts,
     )
+    trajectory = coords_angstrom_to_trajectory(coords, topology)
     if out is not None:
         write_sampling_output(
             trajectory,
@@ -412,8 +495,6 @@ def _embed_and_sample(
             out=out,
             physicality_filter=physicality_mode,
         )
-        if managed_partial_dir is not None:
-            shutil.rmtree(managed_partial_dir)
     return trajectory
 
 
@@ -429,7 +510,6 @@ def predict_structure(
     potentials: Sequence[Potential] | None = None,
     seed: int | None = None,
     progress: bool = True,
-    partial_dir: Path | None = None,
     output_dir: str | Path | None = None,
     physicality_mode: PhysicalityFilterMode | str = PhysicalityFilterMode.HIGH_QUALITY,
 ) -> mdtraj.Trajectory:
@@ -447,36 +527,42 @@ def predict_structure(
         num_steps: Optional denoising step count instead of the preset default.
         potentials: Optional steering potentials instead of the preset defaults.
             Requires ``"edm_gd"``, ``"edm_fk"``, or ``"edm_fkc"``.
-        seed: Optional Torch random seed.
+        seed: Optional Torch random seed; batch ``i`` uses ``seed + i``. Without it,
+            a seed is drawn from the global RNG.
         progress: Whether to display sampling progress.
-        partial_dir: Directory for saving and reusing completed raw batches.
-            Reuse only with identical inputs and settings and one writer.
         output_dir: Optional directory for all samples, topology, system, and
             physicality.json. When set, checking and saving are automatic.
-            Completed batches in output_dir/partial are reused and removed after
-            successful saving unless an explicit partial_dir is supplied.
-            Reuse only with identical inputs and settings and one writer.
+            Raw batches are kept in output_dir/batches; a rerun with the same
+            directory continues from them after checking the inputs recorded in
+            ``run.json``. Use one writer. Without
+            it, nothing is checked or written.
         physicality_mode: Check thresholds for saved outputs; no frames are removed.
-            Without output_dir, no checks are run and no final outputs are written.
 
     Returns:
         Predicted structures as an MDTraj trajectory in nanometers.
+
+    Raises:
+        ValueError: If ``output_dir/batches`` holds completed batches with
+            different inputs recorded in ``run.json``.
     """
-    return _embed_and_sample(
+    configured_sampler = sampler_from_preset(
+        sampler, mode="structure", num_steps=num_steps, potentials=potentials
+    )
+    msa = get_msa(system)
+    trunk_embeddings = model.embed(system, msa=msa, mode="structure", contacts=contacts)
+    return sample_with_embeddings(
         system,
+        trunk_embeddings,
         model=model,
-        mode="structure",
-        contacts=contacts,
         num_samples=num_samples,
         batch_size=batch_size,
-        sampler=sampler,
-        num_steps=num_steps,
-        potentials=potentials,
+        sampler=configured_sampler,
         seed=seed,
         progress=progress,
-        partial_dir=partial_dir,
         output_dir=output_dir,
         physicality_mode=physicality_mode,
+        mode="structure",
+        contacts=contacts,
     )
 
 
@@ -492,7 +578,6 @@ def sample_equilibrium(
     potentials: Sequence[Potential] | None = None,
     seed: int | None = None,
     progress: bool = True,
-    partial_dir: Path | None = None,
     output_dir: str | Path | None = None,
     physicality_mode: PhysicalityFilterMode | str = PhysicalityFilterMode.HIGH_QUALITY,
 ) -> mdtraj.Trajectory:
@@ -510,36 +595,42 @@ def sample_equilibrium(
         num_steps: Optional denoising step count instead of the preset default.
         potentials: Optional steering potentials instead of the preset defaults.
             Requires ``"edm_gd"``, ``"edm_fk"``, or ``"edm_fkc"``.
-        seed: Optional Torch random seed.
+        seed: Optional Torch random seed; batch ``i`` uses ``seed + i``. Without it,
+            a seed is drawn from the global RNG.
         progress: Whether to display sampling progress.
-        partial_dir: Directory for saving and reusing completed raw batches.
-            Reuse only with identical inputs and settings and one writer.
         output_dir: Optional directory for all samples, topology, system, and
             physicality.json. When set, checking and saving are automatic.
-            Completed batches in output_dir/partial are reused and removed after
-            successful saving unless an explicit partial_dir is supplied.
-            Reuse only with identical inputs and settings and one writer.
+            Raw batches are kept in output_dir/batches; a rerun with the same
+            directory continues from them after checking the inputs recorded in
+            ``run.json``. Use one writer. Without
+            it, nothing is checked or written.
         physicality_mode: Check thresholds for saved outputs; no frames are removed.
-            Without output_dir, no checks are run and no final outputs are written.
 
     Returns:
         Equilibrium conformations as an MDTraj trajectory in nanometers.
+
+    Raises:
+        ValueError: If ``output_dir/batches`` holds completed batches with
+            different inputs recorded in ``run.json``.
     """
-    return _embed_and_sample(
+    configured_sampler = sampler_from_preset(
+        sampler, mode="equilibrium", num_steps=num_steps, potentials=potentials
+    )
+    msa = get_msa(system)
+    trunk_embeddings = model.embed(system, msa=msa, mode="equilibrium", contacts=contacts)
+    return sample_with_embeddings(
         system,
+        trunk_embeddings,
         model=model,
-        mode="equilibrium",
-        contacts=contacts,
         num_samples=num_samples,
         batch_size=batch_size,
-        sampler=sampler,
-        num_steps=num_steps,
-        potentials=potentials,
+        sampler=configured_sampler,
         seed=seed,
         progress=progress,
-        partial_dir=partial_dir,
         output_dir=output_dir,
         physicality_mode=physicality_mode,
+        mode="equilibrium",
+        contacts=contacts,
     )
 
 
@@ -571,8 +662,14 @@ def write_sampling_output(
     contacts: list[Contact] | None,
     out: Path,
     physicality_filter: PhysicalityFilterMode,
-) -> Path:
-    """Write all frames and their physicality results in original order."""
+    suffix: str = "",
+) -> None:
+    """Write system.yaml, topology.cif, all frames and their physicality in original order.
+
+    Frames go to ``samples{suffix}.xtc`` and physicality results to
+    ``physicality{suffix}.json``.
+    """
+    write_sampling_system(system, mode=mode, contacts=contacts, out=out)
     structure = AllAtomStructure.from_system(system, mode=mode, contacts=contacts)
     report = check_physicality(
         trajectory,
@@ -580,8 +677,8 @@ def write_sampling_output(
         expected_extra_bonds=expected_extra_bonds_from_system(system, trajectory.topology),
     )
     save_topology_cif(structure, system, trajectory.xyz[0] * 10.0, out / "topology.cif")
-    trajectory.save_xtc(str(out / "samples.xtc"))
-    report.save(out / "physicality.json")
+    trajectory.save_xtc(str(out / f"samples{suffix}.xtc"))
+    report.save(out / f"physicality{suffix}.json")
     failed = len(trajectory) - int(report.passed.sum())
     if failed:
         logger.warning(
@@ -590,4 +687,3 @@ def write_sampling_output(
             len(trajectory),
         )
     logger.info("Wrote %d samples and physicality results to %s", len(trajectory), out)
-    return out / "samples.xtc"

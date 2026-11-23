@@ -40,15 +40,13 @@ BioEmu-2 is not intended or validated for:
 
 - quantitative binding-affinity or absolute free-energy prediction;
 
-- de novo small-molecule design;
-
 - autonomous or high-risk decision-making (e.g. law enforcement, legal, finance, healthcare);
 
 - sensitive domains where inaccurate outputs could lead to injury or affect someone's legal, financial, or life opportunities;
 
 - uses that violate applicable law, export controls, or the Microsoft Acceptable Use Policy.
 
-BioEmu-2 predicts structural ensembles for sequences supplied by the user. It does not generate sequences, and it does not predict binding affinities. Predicted structures are not experimentally validated measurements and should not be treated as such.
+BioEmu-2 predicts structural ensembles for sequences and molecular graphs supplied by the user. It does intrinsically not generate sequences or design molecules, although it can be used in design frameworks in concert with other tools. It is not calibrated on experimental binding affinities, although the probability of sampling ligands in their binding pocket may correlate with the binding affinity.
 
 BioEmu-2 is released for research purposes. We do not recommend using it in commercial or real-world applications without further testing and development.
 
@@ -58,7 +56,7 @@ It was not designed or evaluated for every possible downstream purpose. Develope
 
 BioEmu-2 provides open-source inference code with a Python API and command-line interface. See the repository README for installation, configuration, and usage instructions.
 
-BioEmu-2 has been tested using NVIDIA GPUs, with an 80 GB A100 being the smallest tested device. Generated structures should be treated as computational hypotheses rather than experimentally validated measurements and should be assessed using appropriate computational or experimental validation before informing downstream research.
+BioEmu-2 has been tested using NVIDIA GPUs, with an 80 GB A100 being the smallest tested device. Generated structures should be treated as computational hypotheses and should be assessed using appropriate computational or experimental validation before informing downstream research.
 
 ### Known limitations
 
@@ -68,9 +66,9 @@ Outputs are plausible hypotheses, not measurements. The following limitations ha
 
 - **Training-distribution bias:** PDB, AFDB, and Microsoft-generated MD data over-represent well-studied protein families. Performance on under-represented sequence classes is uncertain.
 
-- **Uncalibrated ensembles:** sampling frequency must not be interpreted as a calibrated Boltzmann probability or quantitative free energy.
+- **Ligand scope:** ligand molecules are supported, but the model has not been trained across a wide range of chemical space and may fail to distinguish ligands outside the training distribution.
 
-- **Ligand scope:** supplied bound ligands are supported, but de novo ligand design and binding-affinity prediction are out of scope.
+- **Binding affinities:** The model has not been trained on predicting binding affinity. It is possible that the probability to sample a ligand in the binding pocket is correlated with experimental binding affinities, but this is uncontrolled with the current model version.
 
 - **Physicality of large systems:** the model may struggle to produce physically plausible structures for extremely large complexes (over 10k tokens).
 
@@ -93,23 +91,6 @@ MD emulation performance is evaluated by sampling a holdout set from the MD data
 The ability to sample large complexes is evaluated on a subset of complexes exceeding 1,500 tokens and compared against reference PDB structures. The selected systems span a range of sizes to demonstrate memory consumption, runtime scaling, and feasibility for multi-GPU deployment. Success is determined by correct overall chain placement, structural physicality, and standard folding quality metrics.
 
 ## Training data
-
-The model was trained on the following data.
-
-| **Dataset** | **Modality** | **Train sequences/systems** |
-|----|----|----|
-| PDB, Boltz-1 preprocessed | Experimental structure | 189,745 |
-| MSR_cath2 | MD trajectories | 886 |
-| MSR_cath3 | MD trajectories | 4,136 |
-| MSR_cath_dimers | MD trajectories | 7,164 |
-| MSR_heterodimers | MD trajectories | 1,272 |
-| MSR_pdbbind2020 | MD trajectories | 3,036 |
-| MSR_pdbbind2020_apo_free | MD trajectories | 2,770 |
-| MSR_megasim_merge | MD trajectories | 170 |
-| AFDB monomer | AI-predicted structure | 7,231,107 |
-| AFDB homodimer multiconformation | AI-predicted structure | 753,271 |
-| AFDB heterodimer multiconformation | AI-predicted structure | 22,157 |
-| Teddymer | AI-predicted structure | 50,651 |
 
 BioEmu-2 was trained only on publicly available data and data generated in-house by Microsoft; it did not use datasets specially licensed to Microsoft. The training data combines experimental structures from the Protein Data Bank (PDB), AI-predicted structures from the AlphaFold Protein Structure Database (AFDB) and Teddymer, and Microsoft-generated molecular-dynamics trajectories. The AFDB datasets contain AlphaFold-family predictions, and Teddymer is derived from AlphaFold2 predictions.
 

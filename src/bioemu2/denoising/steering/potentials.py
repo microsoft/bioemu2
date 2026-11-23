@@ -1018,7 +1018,7 @@ def get_default_potentials() -> Sequence[Potential]:
         SymmetricChainCOMPotential(
             parameters={
                 "guidance_interval": 4,
-                "guidance_weight": 0.5,
+                "guidance_weight": PiecewiseStepFunction(thresholds=[0.2], values=[0.5, 0.0]),
                 "resampling_weight": 0.5,
                 "buffer": ExponentialInterpolation(start=1.0, end=5.0, alpha=-2.0),
             }
@@ -1026,7 +1026,7 @@ def get_default_potentials() -> Sequence[Potential]:
         InterChainVDWOverlapPotential(
             parameters={
                 "guidance_interval": 5,
-                "guidance_weight": PiecewiseStepFunction(thresholds=[0.4], values=[0.125, 0.0]),
+                "guidance_weight": PiecewiseStepFunction(thresholds=[0.2], values=[0.125, 0.0]),
                 "resampling_weight": PiecewiseStepFunction(thresholds=[0.6], values=[0.01, 0.0]),
                 "buffer": 0.225,
             }
@@ -1034,7 +1034,7 @@ def get_default_potentials() -> Sequence[Potential]:
         PoseBustersPotential(
             parameters={
                 "guidance_interval": 1,
-                "guidance_weight": 0.10,
+                "guidance_weight": PiecewiseStepFunction(thresholds=[0.2], values=[0.10, 0.0]),
                 "resampling_weight": 0.1,
                 "bond_buffer": 0.20,
                 "angle_buffer": 0.20,
@@ -1044,7 +1044,7 @@ def get_default_potentials() -> Sequence[Potential]:
         ChiralAtomPotential(
             parameters={
                 "guidance_interval": 1,
-                "guidance_weight": 0.20,
+                "guidance_weight": PiecewiseStepFunction(thresholds=[0.2], values=[0.20, 0.0]),
                 "resampling_weight": 1.0,
                 "buffer": 0.52360,
             }
@@ -1052,7 +1052,7 @@ def get_default_potentials() -> Sequence[Potential]:
         StereoBondPotential(
             parameters={
                 "guidance_interval": 1,
-                "guidance_weight": 0.10,
+                "guidance_weight": PiecewiseStepFunction(thresholds=[0.2], values=[0.10, 0.0]),
                 "resampling_weight": 1.0,
                 "buffer": 0.52360,
             }
@@ -1060,7 +1060,7 @@ def get_default_potentials() -> Sequence[Potential]:
         PlanarBondPotential(
             parameters={
                 "guidance_interval": 1,
-                "guidance_weight": 0.10,
+                "guidance_weight": PiecewiseStepFunction(thresholds=[0.2], values=[0.10, 0.0]),
                 "resampling_weight": 1.0,
                 "buffer": 0.26180,
             }
@@ -1068,7 +1068,7 @@ def get_default_potentials() -> Sequence[Potential]:
         IntraChainVDWOverlapPotential(
             parameters={
                 "guidance_interval": 5,
-                "guidance_weight": PiecewiseStepFunction(thresholds=[0.4], values=[0.125, 0.0]),
+                "guidance_weight": PiecewiseStepFunction(thresholds=[0.2], values=[0.125, 0.0]),
                 "resampling_weight": PiecewiseStepFunction(thresholds=[0.6], values=[0.01, 0.0]),
                 "buffer": 0.225,
             }
@@ -1076,7 +1076,7 @@ def get_default_potentials() -> Sequence[Potential]:
         PolymerLocalClashPotential(
             parameters={
                 "guidance_interval": 1,
-                "guidance_weight": PiecewiseStepFunction(thresholds=[0.4], values=[0.125, 0.0]),
+                "guidance_weight": PiecewiseStepFunction(thresholds=[0.2], values=[0.125, 0.0]),
                 "resampling_weight": 0.1,
                 "minimum_distance": 2.0,
             }
@@ -1085,7 +1085,7 @@ def get_default_potentials() -> Sequence[Potential]:
             sigma_tolerance=10.0,
             parameters={
                 "guidance_interval": 1,
-                "guidance_weight": 0.05,
+                "guidance_weight": PiecewiseStepFunction(thresholds=[0.2], values=[0.05, 0.0]),
                 "resampling_weight": 0.1,
             },
         ),
@@ -1093,7 +1093,7 @@ def get_default_potentials() -> Sequence[Potential]:
             sigma_tolerance=10.0,
             parameters={
                 "guidance_interval": 1,
-                "guidance_weight": 0.05,
+                "guidance_weight": PiecewiseStepFunction(thresholds=[0.2], values=[0.05, 0.0]),
                 "resampling_weight": 0.1,
             },
         ),

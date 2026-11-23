@@ -29,6 +29,7 @@ from bioemu2.data_interface import Atom, Bond, Protein, System
 from bioemu2.denoising.steering.edm_steered import _slice_conditioning
 from bioemu2.paths import EXAMPLES_DIR
 from bioemu2.physicality import PhysicalityFilterMode, check_allatom_physicality
+from bioemu2.sampling import rng_seed
 from bioemu2.structure import BatchAllAtomStructure
 
 
@@ -107,18 +108,16 @@ def test_propagate_conditions_each_frame(monkeypatch: pytest.MonkeyPatch) -> Non
         seed=7,
     )
 
-    # Chunked by batch_size; each chunk carries its own centered, padded conditions.
-    assert [c["num_samples"] for c in calls] == [2, 1]
-    assert [c["batch_size"] for c in calls] == [2, 1]
+    # One call; generate_samples batches it. Each frame has its own centered, padded condition.
+    [call] = calls
+    assert (call["num_samples"], call["batch_size"], call["seed"]) == (3, 2, 7)
     centered = 10 * (x0.xyz - x0.xyz.mean(axis=1, keepdims=True))
-    for call, frames in zip(calls, [slice(0, 2), slice(2, 3)], strict=True):
-        call_batch = call["batch"]
-        n = frames.stop - frames.start
-        assert call_batch.coords_cond.shape == (n, 4, 3)
-        torch.testing.assert_close(call_batch.coords_cond[:, :3], torch.as_tensor(centered[frames]))
-        assert call_batch.coords_cond[:, 3].abs().sum() == 0
-        assert torch.equal(call_batch.is_dynamics_conditioned, torch.ones(1, n, dtype=torch.bool))
-        torch.testing.assert_close(call_batch.dt, torch.full((1, n), 1000.0))
+    call_batch = call["batch"]
+    assert call_batch.coords_cond.shape == (3, 4, 3)
+    torch.testing.assert_close(call_batch.coords_cond[:, :3], torch.as_tensor(centered))
+    assert call_batch.coords_cond[:, 3].abs().sum() == 0
+    assert torch.equal(call_batch.is_dynamics_conditioned, torch.ones(1, 3, dtype=torch.bool))
+    torch.testing.assert_close(call_batch.dt, torch.full((1, 3), 1000.0))
     # The caller's sampling inputs are untouched.
     original = batch.coords_cond
     assert original is not None and original.shape == (1, 4, 3)
@@ -131,10 +130,10 @@ def test_propagate_conditions_each_frame(monkeypatch: pytest.MonkeyPatch) -> Non
     np.testing.assert_allclose(result.xyz, expected, atol=1e-5)
 
 
-def test_propagate_preserves_independent_trajectories_across_steps_and_chunks(
+def test_propagate_preserves_independent_trajectories_across_steps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Distinct first-step shapes remain each slot's condition across two-frame chunks.
+    """Distinct first-step shapes remain each slot's condition in the next step.
 
     The fake sampler scales each of four identical starts by a different factor,
     then doubles every resulting shape on the next step. Each reconstructed
@@ -155,10 +154,9 @@ def test_propagate_preserves_independent_trajectories_across_steps_and_chunks(
         assert coords_cond is not None
         received.append(coords_cond.clone())
         if step == 0:
-            # Each chunk contains two different endpoint shapes; the second
-            # propagation must use each shape rather than restarting from initial.
-            scales = torch.tensor([1.25, 1.5]) if len(received) % 2 else torch.tensor([1.75, 2.0])
-            return coords_cond[:, :3] * scales[: len(coords_cond), None, None]
+            # Four different endpoint shapes; the second propagation must use
+            # each shape rather than restarting from initial.
+            return coords_cond[:, :3] * torch.tensor([1.25, 1.5, 1.75, 2.0])[:, None, None]
         return coords_cond[:, :3] * 2
 
     monkeypatch.setattr(inference_api, "generate_samples", sample)
@@ -180,9 +178,9 @@ def test_propagate_preserves_independent_trajectories_across_steps_and_chunks(
             )
         )
 
-    assert [len(chunk) for chunk in received] == [2, 2, 2, 2]
+    assert [len(conditions) for conditions in received] == [4, 4]
     expected_conditions = 10 * (frames[1].xyz - frames[1].xyz.mean(axis=1, keepdims=True))
-    torch.testing.assert_close(torch.cat(received[2:])[:, :3], torch.as_tensor(expected_conditions))
+    torch.testing.assert_close(received[1][:, :3], torch.as_tensor(expected_conditions))
     for i, scale in enumerate([1.25, 1.5, 1.75, 2.0]):
         trajectory = mdtraj.join([step_frames[i] for step_frames in frames])
         assert trajectory.n_frames == 3
@@ -344,6 +342,22 @@ def test_simulate_trajectory_reuses_embedding_with_loaded_model(
     assert scales == [1.0, 1.0]
 
 
+def test_simulate_trajectory_rejects_empty_x0() -> None:
+    model: Any = SimpleNamespace(supports_propagation=True)
+    x0 = mdtraj.Trajectory(np.zeros((0, 3, 3), dtype=np.float32), _three_atom_topology())
+    with pytest.raises(ValueError, match="x0 must be a non-empty"):
+        simulate_trajectory_with_embeddings(
+            cast(System, SimpleNamespace()),
+            cast(TrunkEmbeddings, SimpleNamespace()),
+            x0=x0,
+            lag_time_ns=1.0,
+            num_trajectory_steps=1,
+            model=model,
+            sampler=EDMSampler(),
+            display_propagation_progress=False,
+        )
+
+
 @pytest.mark.parametrize("preset", ["edm_fk", "edm_fkc"])
 def test_simulate_trajectory_rejects_resampling_presets_before_msa(
     monkeypatch: pytest.MonkeyPatch, preset: Any
@@ -386,7 +400,7 @@ def test_join_trajectory_steps_sets_times_and_preserves_trajectory_order() -> No
         join_trajectory_steps([start, endpoint[:1]], lag_time_ns=1.0)
 
 
-def test_simulate_trajectory_uses_one_seeded_stream_and_restores_rng(
+def test_simulate_trajectory_seeds_rise_linearly_and_restore_rng(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     topology = _three_atom_topology()
@@ -407,40 +421,45 @@ def test_simulate_trajectory_uses_one_seeded_stream_and_restores_rng(
         inference_api, "prepare_sampling_inputs", lambda *_args, **_kwargs: (topology, batch)
     )
     monkeypatch.setattr(inference_api, "_report_trajectory_physicality", lambda *_: None)
+    draws: list[torch.Tensor] = []
 
-    def run(seed: int) -> tuple[mdtraj.Trajectory, list[float]]:
-        draws: list[float] = []
+    class NoisySampler(EDMSampler):
+        """Adds Gaussian noise to each conditioning frame through the real generate_samples."""
 
-        def sample(**kwargs: Any) -> torch.Tensor:
-            coords_cond = kwargs["batch"].coords_cond
-            assert coords_cond is not None
-            scale = 1.0 + torch.rand(())
-            draws.append(scale.item())
-            return scale * coords_cond[:, :3]
+        def __call__(self, *, batch: BatchAllAtomStructure, **_kwargs: Any) -> Any:
+            assert batch.coords_cond is not None
+            draws.append(torch.randn_like(batch.coords_cond))
+            return SimpleNamespace(coords=batch.coords_cond + draws[-1])
 
-        monkeypatch.setattr(inference_api, "generate_samples", sample)
+    def run(seed: int) -> np.ndarray:
         torch.manual_seed(1234)
         rng_state = torch.random.get_rng_state()
-        trajectory = simulate_trajectory_with_embeddings(
+        trajectories = simulate_trajectory_with_embeddings(
             system,
             trunk_embeddings,
-            x0=x0,
+            x0=x0[[0, 0, 0]],
             lag_time_ns=1.0,
             num_trajectory_steps=2,
             model=model,
-            sampler=EDMSampler(),
-            seed=7,
+            batch_size=2,
+            sampler=NoisySampler(),
+            seed=seed,
             display_propagation_progress=False,
-        )[0]
+        )
         assert torch.equal(torch.random.get_rng_state(), rng_state)
-        return trajectory, draws
+        return np.stack([trajectory.xyz for trajectory in trajectories])
 
-    first_trajectory, first_draws = run(7)
-    second_trajectory, second_draws = run(7)
-
-    assert first_draws == second_draws
-    assert first_draws[0] != first_draws[1]
-    np.testing.assert_allclose(first_trajectory.xyz, second_trajectory.xyz)
+    first = run(7)
+    # Three frames in batches of two: batch j of step t uses 7 + 2 * t + j.
+    expected = []
+    for seed, size in zip((7, 8, 9, 10), (2, 1, 2, 1), strict=True):
+        with rng_seed(seed):
+            expected.append(torch.randn(size, 4, 3))
+    assert len(draws) == len(expected)
+    for draw, reference in zip(draws, expected, strict=True):
+        torch.testing.assert_close(draw, reference, rtol=0, atol=0)
+    np.testing.assert_array_equal(run(7), first)
+    assert not np.allclose(run(8), first)
 
 
 @pytest.mark.parametrize(
@@ -619,7 +638,7 @@ def test_rng_seed_forks_all_cuda_devices(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(torch.random, "fork_rng", fork_rng)
     monkeypatch.setattr(torch, "manual_seed", lambda seed: seeded.append(seed))
 
-    with inference_api.rng_seed(7):
+    with rng_seed(7):
         pass
 
     assert forked_devices == [[0, 1, 2]]

@@ -46,7 +46,7 @@ bioemu2 propagate \
   --x0-cif outputs/adk-start/topology.cif \
   --num-samples 8 \
   --lag-time-ns 1 \
-  --out outputs/adk-propagated
+  --out outputs/adk-start-propagated
 ```
 
 Pass the CIF and a matching system YAML to retain custom definitions and
@@ -84,8 +84,8 @@ frame passed physicality checks.
 `physicality.json` has one entry per endpoint, in the
 [same format as for sampling](sampling.md#use-the-cli). Rejected frames remain
 in the XTC, so report index `i` describes frame `i`.
-Use a new `--out` directory for each run: the CLI refuses to overwrite
-`samples.xtc`, `physicality.json`, or `samples_*.xtc`.
+Rerun with the same `--out` to continue an interrupted run; see
+[resume an interrupted sampling run](sampling.md#resume-an-interrupted-sampling-run).
 
 ## Use EmuSession
 
@@ -243,10 +243,12 @@ propagation step. Each returned trajectory includes its starting frame at time
 zero, and MDTraj frame times are stored in picoseconds. Endpoints are aligned to
 their own preceding frames.
 
-After the rollout, BioEmu2 reports how many frames pass the `high_quality`
-physicality thresholds and the aggregate violation counts. It does not remove
-or retry failed frames, so every returned trajectory contains the requested
-number of frames.
+After the rollout, BioEmu2 checks physicality. Without `output_dir`, it logs
+how many frames pass the `high_quality` thresholds and the aggregate violation
+counts. With `output_dir`, it checks with `physicality_mode` and saves the
+results to one `physicality_NNNNNN.json` per trajectory, next to its
+`samples_NNNNNN.xtc`. It does not remove or retry failed frames, so
+every returned trajectory contains the requested number of frames.
 
 ## Customize each trajectory step
 

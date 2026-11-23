@@ -13,6 +13,7 @@ from bioemu2.denoising.samplers import EDMSampler, GuidedFKSampler, Sampler
 from bioemu2.embedding_cache import contacts_digest, msa_digest, system_digest
 from bioemu2.model import InferenceModel, _InferenceModel
 from bioemu2.msa.alignment import MSA, get_msa
+from bioemu2.physicality import PhysicalityFilterMode
 from bioemu2.propagation import propagate_with_embeddings
 from bioemu2.sampling import SamplerPreset, sample_with_embeddings, sampler_from_preset
 
@@ -161,12 +162,16 @@ class EmuSession:
         sampler: SamplerPreset | Sampler = "edm",
         seed: int | None = None,
         progress: bool = True,
-        partial_dir: Path | None = None,
+        output_dir: str | Path | None = None,
+        physicality_mode: PhysicalityFilterMode | str = PhysicalityFilterMode.HIGH_QUALITY,
     ) -> mdtraj.Trajectory:
         """Draw independent structures using this instance's task mode.
 
         ``"structure"`` selects the prediction step scale; ``"equilibrium"``
         selects the equilibrium step scale. A configured sampler is used unchanged.
+        With ``output_dir``, results are saved and interrupted runs resume as in
+        ``sample_with_embeddings``; without it, nothing is written.
+        ``physicality_mode`` selects the check thresholds for saved outputs.
         """
         configured_sampler = (
             sampler_from_preset(sampler, mode=self.mode) if isinstance(sampler, str) else sampler
@@ -192,7 +197,10 @@ class EmuSession:
             sampler=configured_sampler,
             seed=seed,
             progress=progress,
-            partial_dir=partial_dir,
+            output_dir=output_dir,
+            physicality_mode=physicality_mode,
+            mode=self.mode,
+            contacts=self.contacts,
         )
 
     def propagate(
@@ -204,12 +212,17 @@ class EmuSession:
         sampler: SamplerPreset | Sampler = "edm",
         seed: int | None = None,
         progress: bool = True,
+        output_dir: str | Path | None = None,
+        physicality_mode: PhysicalityFilterMode | str = PhysicalityFilterMode.HIGH_QUALITY,
     ) -> mdtraj.Trajectory:
         """Draw one time-lagged endpoint per starting frame, in input order.
 
         Propagation normally uses equilibrium embeddings; other modes log a
         warning. The checkpoint must support propagation. Use
-        ``map_cif_atom_order`` to load a CIF as ``x0``.
+        ``map_cif_atom_order`` to load a CIF as ``x0``. With ``output_dir``,
+        endpoints are saved and interrupted runs resume as in
+        ``propagate_with_embeddings``. ``physicality_mode`` selects the check
+        thresholds for saved outputs.
         """
         if self.mode != "equilibrium":
             logger.warning(
@@ -233,4 +246,7 @@ class EmuSession:
             sampler=configured_sampler,
             seed=seed,
             progress=progress,
+            output_dir=output_dir,
+            physicality_mode=physicality_mode,
+            contacts=self.contacts,
         )

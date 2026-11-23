@@ -27,12 +27,12 @@ Generate sixty-four independent equilibrium conformations of adenylate kinase
 bioemu2 sample-equilibrium \
   --pdb-id 1AKE \
   --num-samples 64 \
-  --out outputs/adk
+  --out outputs/adk-64
 ```
 
 The command computes an MSA, downloads the default `bioemu2-preview` checkpoint,
-and writes all sixty-four conformations to `outputs/adk/samples.xtc` with
-their topology in `outputs/adk/topology.cif`. It also writes the resolved
+and writes all sixty-four conformations to `outputs/adk-64/samples.xtc` with
+their topology in `outputs/adk-64/topology.cif`. It also writes the resolved
 system and command to the output directory. The first run requires network
 access for the RCSB structure, MSA search, and checkpoint download.
 
@@ -123,7 +123,8 @@ The [functional API](functional-api.md#sample-structures) provides corresponding
 `EmuSession` handles the full workflow: given a [`System`](system.md) and a model
 from [`load_model()`](checkpoints.md), it computes the [MSA](msa.md), prepares
 the system for the model, and selects the sampling settings for the task.
-It returns every generated frame; check physicality separately before saving.
+Without `output_dir`, it returns every generated frame; check physicality
+separately before saving.
 
 ### Use a different model or precision
 
@@ -196,8 +197,8 @@ it uses the supplied value unchanged. `FKCSampler` has no step scale.
 
 ## Check physicality
 
-`EmuSession.sample()` returns every generated frame and leaves checking and
-saving to the caller. Call `check_physicality()` explicitly to obtain per-frame
+Without `output_dir`, `EmuSession.sample()` returns every generated frame and
+leaves checking and saving to the caller. Call `check_physicality()` explicitly to obtain per-frame
 results for chain breaks, clashes, and other geometry checks:
 
 ```python
@@ -264,24 +265,16 @@ the [propagation guide](propagation.md).
 ## Resume an interrupted sampling run
 
 Sampling a large ensemble can be interrupted by a pre-empted job or a process
-failure. A partial directory stores completed raw batches so restarting the
-same run generates only the unfinished batches, rather than starting over.
-These intermediate coordinates are reused before assembling the returned samples.
+failure. With `output_dir`, completed raw batches are stored in
+`<output_dir>/batches`, so restarting the same run generates only the
+unfinished batches, rather than starting over.
 
-On the command line, `predict-structure` and `sample-equilibrium` save
-completed batches in `<out>/partial`. Rerun the same command with the same
-output directory to resume. After all final output files are written
-successfully, the CLI removes the partial directory; interrupted runs retain
-it. Pass `--seed` to make batch seeds repeatable.
-
-In Python, pass `partial_dir` to `EmuSession.sample()` to save completed
-batches. If the process stops, recreate the same session and repeat the call
-with the same settings and partial directory:
+Pass `output_dir` to `emu.sample()` to save completed batches. If the process
+stops, recreate the same session and repeat the call with the same settings
+and output directory:
 
 ```python
-from pathlib import Path
-
-from bioemu2 import EmuSession, System, load_model, save_frames
+from bioemu2 import EmuSession, System, load_model
 
 system = System.from_pdb_id("1AKE")
 emu = EmuSession(system, model=load_model(), mode="equilibrium")
@@ -289,31 +282,31 @@ samples = emu.sample(
     num_samples=4000,
     batch_size=50,
     seed=42,
-    partial_dir=Path("outputs/adk-python/partial"),
+    output_dir="outputs/adk-resume",
 )
-save_frames(samples, Path("outputs/adk-python"))
 ```
 
-After saving the returned trajectory, you are responsible for removing
-`partial_dir`; `EmuSession.sample()` does not clean it up.
+On a rerun with the same output directory, BioEmu2 logs how many completed
+batches it found, skips them, and samples the rest. Batches are kept in
+`<output_dir>/batches` after the final outputs are saved. The CLI behaves the
+same: rerun the command with the same `--out`.
+
+Before reusing batches, BioEmu2 checks that the system, mode, contacts, `seed`,
+`num_samples`, `batch_size`, sampler type, `num_steps`, `step_scale` and checkpoint match the saved
+run. A mismatch raises an error; use a new output directory or delete `<output_dir>`.
+Propagation also checks the lag time and the starting frames, saved as `x0.npy`
+next to `run.json`. Potentials, precision and other sampler settings are not
+checked, so keep them unchanged. Use one writer per directory.
 
 If restarting in a new process, reload the model and create a new `EmuSession`.
 Embeddings are recomputed unless the [embedding disk cache](reuse-embeddings.md#cache-embeddings-to-disk-automatically)
 is enabled, in which case unchanged embeddings are read from disk.
 
-Use each partial directory for only one run at a
-time, with one writer. Keep the system, model, sampler, seed, batch size, and
-other settings identical when retrying: saved batches are not checked against
-those inputs. Completed batches are reused; an interrupted batch is generated
-again.
-
-Sampling is unseeded by default, including when resuming. Completed batches
-are reused, and unfinished batches draw new randomness without resetting the
-RNG; they need not match an uninterrupted run. To assign the same seed to each
-batch on a retry, pass `seed`. With a seed,
-batch `i` uses `seed + i` whether or not `partial_dir` is supplied.
-[Multi-GPU context-parallel sampling](context-parallel-sampling.md) and
-propagation do not support this recovery.
+With `seed`, batch `i` uses `seed + i`, so a resumed run matches an uninterrupted one.
+Without `seed`, each call draws a new seed, and a rerun without `seed` keeps
+the saved batches and samples the rest with the new seed.
+[Multi-GPU context-parallel sampling](context-parallel-sampling.md) does not
+save batches and cannot resume.
 
 ## Save generated structures
 
@@ -336,8 +329,9 @@ print(output_path)
 
 The trajectory already carries the system topology, so no separate topology
 argument is needed. `save_frames()` writes `samples.xtc` and `topology.cif`.
-The session returns all frames without writing files. Physicality checking
-and saving are separate operations; no frames are removed automatically.
+Without `output_dir`, the session returns all frames without writing files.
+Pass `output_dir` to `emu.sample()` to also write `system.yaml` and
+`physicality.json`. No frames are removed automatically.
 
 ### Read residue names in saved topology files
 

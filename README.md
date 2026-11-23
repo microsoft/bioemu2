@@ -8,7 +8,7 @@
 
 **Predict folded structures, sample equilibrium ensembles, and propagate structures forward in time.**
 
-[Installation](#installation) · [Quick start](#quick-start) · [Tutorials](#tutorials) · [Documentation](docs/)
+[Report](https://arxiv.org/abs/2611.27924) · [Installation](#installation) · [Quick start](#quick-start) · [Tutorials](#tutorials) · [Documentation](docs/)
 
 <br>
 
@@ -294,6 +294,18 @@ Cells** from the **Run** menu.
 In VS Code, you can instead run **Jupyter: Export Current Python File as Jupyter
 Notebook** from the Command Palette. Generated `.ipynb` files are ignored by
 Git.
+
+## Citation
+
+If you use our work, please cite our preprint
+```bibtex
+@article{gastegger2026bioemu2,
+  title={BioEmu2: Scalable Emulation of Biomolecular Dynamics},
+  author={Michael Gastegger, Adam E. Foster, José Jiménez-Luna, Tim Hempel, Sarah Lewis, Yu Xie, Lixin Sun, Iryna Zaporozhets, J. Thorben Frank, Yaoyi Chen, Michael Plainer, Ludwig Winkler, Pedro B. P. S. Reis, Sven H. Giese, Roberto Sordillo, Victor García Satorras, Eray Inanc, Kacper Kapuśniak, Soojung Yang, Rishwanth Raghu, Rachel Kim, Gabriel Dernbach, Deniz Gunceler, Hannes Schulz, Bonnie Kruft, Marwin Segler, Christopher M. Bishop, Cecilia Clementi, Ryota Tomioka, Frank Noé},
+  journal={arXiv preprint arXiv:2611.27924},
+  year={2026}
+}
+```
 
 ## License
 
