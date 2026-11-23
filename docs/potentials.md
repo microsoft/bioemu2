@@ -33,6 +33,13 @@ These ten potentials form the default **physicality potentials** used by
 properties for different purposes, such as favouring a particular protein
 conformation.
 
+`PoseBustersPotential`, `ChiralAtomPotential`, `StereoBondPotential`, and
+`PlanarBondPotential` derive their ligand constraints with RDKit from the
+ligand's CCD code, SMILES, or InChI. Chiral and stereo terms apply only to
+stereocentres and double bonds whose configuration the input specifies, such as
+`@`/`@@` and `/`/`\` in SMILES. Stereocentres with a lone pair, such as
+sulfoxides, get no chiral term.
+
 The module also provides two more specialised potentials:
 `ContactPotential` penalises atom pairs exceeding a contact distance, and
 `TemplateReferencePotential` penalises deviations from a rigid-aligned reference

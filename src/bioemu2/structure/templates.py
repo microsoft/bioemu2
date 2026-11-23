@@ -296,6 +296,17 @@ def _assign_mol_atom_names(mol: Mol) -> None:
         atom.SetProp("name", atom_name)
 
 
+def _named_mol_with_hs(mol: Mol) -> Mol:
+    """Return `mol` with hydrogens added and canonical atom names assigned.
+
+    Ligand templates and the steering constraints built for SMILES/InChI ligands
+    both use this, so constraint atoms match template atoms by name.
+    """
+    mol_w_hs = AddHs(mol)
+    _assign_mol_atom_names(mol_w_hs)
+    return mol_w_hs
+
+
 def _template_from_rdmol(mol: Mol, max_iters: int = 100, **kwargs) -> AllAtomStructure:
     """
     Generates a ligand template from an RDKit Mol object
@@ -307,8 +318,7 @@ def _template_from_rdmol(mol: Mol, max_iters: int = 100, **kwargs) -> AllAtomStr
     """
 
     generator = ETKDGv3()
-    mol_w_hs = AddHs(mol)  # Add hydrogens before optim.
-    _assign_mol_atom_names(mol_w_hs)  # Assign atom names
+    mol_w_hs = _named_mol_with_hs(mol)  # Add hydrogens before optim.
     conf_id = EmbedMolecule(mol_w_hs, generator, **kwargs)  # Get initial conformer
     if conf_id == -1:
         # Distance-geometry embedding can fail for complex molecules (e.g. large

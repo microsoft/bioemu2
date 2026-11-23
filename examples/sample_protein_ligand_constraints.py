@@ -42,7 +42,6 @@ from bioemu2 import (
     save_frames,
 )
 from bioemu2.data_interface import ContactToken
-from bioemu2.rng import seed_random_generators
 from bioemu2.visualization import view_structure_grid
 
 # %% [markdown]
@@ -136,14 +135,12 @@ display(Markdown("\n".join(contact_table)))
 # seed and plain EDM, without steering, in structure-prediction mode.
 #
 # For repeatable runs, keep the checkpoint, GPU, software, and sampling settings
-# fixed, and seed all random generators before each session.
+# fixed.
 # %%
 if run_inference:
-    seed_random_generators(seed)
     model = load_model(device="cuda", precision="bf16-mixed", matmul_precision="highest")
     query_only = MSA(unpaired_a3m={"A": f">query\n{protein.sequence}\n"})
     for case, contacts in contacts_by_case.items():
-        seed_random_generators(seed)
         emu = EmuSession(system, model=model, mode="structure", msa=query_only, contacts=contacts)
         samples = emu.sample(
             num_samples=5, batch_size=1, seed=seed,

@@ -255,7 +255,7 @@ Context parallelism does not yet support:
   embeddings; see
   [reuse embeddings with context parallelism](reuse-embeddings.md#reuse-embeddings-with-context-parallelism).
 - [Resuming an interrupted run](sampling.md#resume-an-interrupted-sampling-run)
-  from a partial directory.
+  from saved batches.
 
 ## Environment and diagnostic logging
 

@@ -8,8 +8,9 @@ on CPU with no checkpoint.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
+import numpy as np
 import pytest
 import torch
 
@@ -19,7 +20,12 @@ from bioemu2.data_interface import Protein, System
 from bioemu2.denoising.edm import edm_sampler
 from bioemu2.denoising.samplers import GuidedFKSampler
 from bioemu2.denoising.steering.edm_steered import edm_steered_sampler
-from bioemu2.denoising.steering.potentials import BondAnglePotential, BondLengthPotential
+from bioemu2.denoising.steering.feats import Tracker
+from bioemu2.denoising.steering.potentials import (
+    BondAnglePotential,
+    BondLengthPotential,
+    Potential,
+)
 from bioemu2.model import InferenceModel
 from bioemu2.structure import AllAtomStructure
 from bioemu2.structure.batch import batch_collate
@@ -37,7 +43,7 @@ class _GaussianScoreModel:
 
     E[x₀ | xₜ, σ] = xₜ / (σ² + 1)
 
-    This makes the Heun update non-trivial (coords shrink toward 0 each step),
+    This makes the update non-trivial (coords shrink toward 0 each step),
     so the parity test exercises the full loop rather than a no-op.
     """
 
@@ -132,10 +138,74 @@ def test_default_protein_bond_guidance_changes_samples(potential_type):
             resampling_interval=None,
             num_gd_steps=2,
             alignment_reverse_diff=False,
-            **_kwargs(num_steps=4),
+            **_kwargs(num_steps=6),
         ).coords
 
     guided = run([guided_potential])
     unsteered = run([])
     assert torch.isfinite(guided).all()
     assert not torch.allclose(guided, unsteered)
+
+
+def test_default_bond_guidance_starts_at_schedule_boundary(tmp_path):
+    """Test that default bond guidance leaves early steps unchanged and starts in the final 20%.
+
+    Run the real 200-step sampler on a tiny protein with a stub denoiser and the same random
+    seed for guided and unguided sampling. Record calls to the default bond-length potential
+    and compare predicted clean coordinates at every step, using one GD iteration per step.
+    """
+
+    class RecordingPotential(Potential):
+        def __init__(self, wrapped: BondLengthPotential):
+            self.wrapped = wrapped
+            self.times: list[float] = []
+
+        def prepare(self, system: System) -> None:
+            self.wrapped.prepare(system)
+
+        def compute_parameters(self, t: float) -> dict[str, Any] | None:
+            return self.wrapped.compute_parameters(t)
+
+        def __call__(self, coords_angstrom: torch.Tensor, *, t: float) -> torch.Tensor:
+            self.times.append(t)
+            return self.wrapped(coords_angstrom, t=t)
+
+    system = System(entities=[Protein(sequence="AAA", asym_ids="A")])
+    potential = RecordingPotential(
+        next(p for p in GuidedFKSampler().potentials if isinstance(p, BondLengthPotential))
+    )
+    potential.prepare(system)
+    batch = batch_collate([AllAtomStructure.from_system(system, mode="structure")])
+    sampler = GuidedFKSampler(
+        num_steps=200,
+        potentials=(potential,),
+        resampling_interval=None,
+        num_gd_steps=1,
+    )
+    score_model = cast(InferenceModel, _GaussianScoreModel())
+
+    def run(sampler, name):
+        tracker = Tracker(tmp_path / name)
+        torch.manual_seed(17)
+        result = sampler(
+            batch=batch,
+            score_model=score_model,
+            trunk_embeddings=_DUMMY_TRUNK,
+            batch_size=1,
+            tracker=tracker,
+        )
+        return result.coords, np.load(tmp_path / name / "x0_hat.npy")
+
+    guided, guided_path = run(sampler, "guided")
+    unsteered, unsteered_path = run(
+        GuidedFKSampler(num_steps=200, potentials=(), resampling_interval=None), "unsteered"
+    )
+    expected_times = [1.0 - (step + 1) / 200 for step in range(159, 199)]
+    # With t = 1 - (step + 1) / 200, t <= 0.2 activates steps 159-198; the final step skips GD.
+    assert potential.times == pytest.approx(expected_times)
+    # Zero guidance weights must leave the entire early trajectory bit-identical.
+    np.testing.assert_array_equal(guided_path[:159], unsteered_path[:159])
+    # Guidance must change coordinates at its first active step, not just evaluate the potential.
+    assert not np.array_equal(guided_path[159], unsteered_path[159])
+    assert torch.isfinite(guided).all()
+    assert not torch.equal(guided, unsteered)

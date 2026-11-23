@@ -15,7 +15,9 @@ from bioemu2.denoising.steering.potentials import (
     BondLengthPotential,
     IntraChainVDWOverlapPotential,
     PolymerLocalClashPotential,
+    SymmetricChainCOMPotential,
 )
+from bioemu2.structure import AllAtomStructure
 
 _PRESETS: list[tuple[str, type[Sampler], Callable[[Any], bool]]] = [
     (
@@ -48,7 +50,10 @@ def test_steering_presets_instantiate_samplers(
     assert [type(p) for p in sampler.potentials[-2:]] == [BondLengthPotential, BondAnglePotential]
     for potential in sampler.potentials[-2:]:
         assert isinstance(potential, BondLengthPotential | BondAnglePotential)
-        assert potential.parameters == {
+        early_parameters = potential.compute_parameters(0.205)
+        assert early_parameters is not None
+        assert early_parameters["guidance_weight"] == 0.0
+        assert potential.compute_parameters(0.2) == {
             "guidance_interval": 1,
             "guidance_weight": 0.05,
             "resampling_weight": 0.1,
@@ -140,7 +145,7 @@ def test_default_potentials_keep_separate_prepared_state(
     torch.testing.assert_close(first_potential(coords, t=0.0), expected)
 
 
-@pytest.mark.parametrize("t", [0.4, 0.41, 0.6, 0.61])
+@pytest.mark.parametrize("t", [0.2, 0.205, 0.6, 0.61])
 @pytest.mark.parametrize(
     "potential_type", [IntraChainVDWOverlapPotential, PolymerLocalClashPotential]
 )
@@ -169,12 +174,34 @@ def test_default_polymer_sterics_apply_scheduled_weights(potential_type, t) -> N
     assert parameters["guidance_interval"] == (5 if is_intrachain else 1)
     torch.testing.assert_close(
         parameters["guidance_weight"] * gradient,
-        (0.125 if t <= 0.4 else 0.0) * reference_gradient,
+        (0.125 if t <= 0.2 else 0.0) * reference_gradient,
     )
     resampling_weight = (0.01 if t <= 0.6 else 0.0) if is_intrachain else 0.1
     torch.testing.assert_close(
         parameters["resampling_weight"] * energy, resampling_weight * reference_energy
     )
+
+
+def test_default_com_keeps_varying_buffer_while_guidance_is_delayed() -> None:
+    """Test that delaying chain-center guidance preserves its changing distance buffer."""
+    system = System(entities=[Protein(sequence="AG", asym_ids=["A", "B"])])
+    structure = AllAtomStructure.from_system(system, mode="structure")
+    potential = next(
+        p for p in GuidedFKSampler().potentials if isinstance(p, SymmetricChainCOMPotential)
+    )
+    potential.prepare(system)
+    coords = torch.zeros(1, structure.num_nodes, 3)
+    coords[:, structure.allatom_asym_id == 1, 0] = 2.0
+
+    early, boundary, final = (potential(coords, t=t) for t in (0.8, 0.2, 0.0))
+    assert early.item() > boundary.item() > final.item() == 0.0
+    early_parameters = potential.compute_parameters(0.8)
+    boundary_parameters = potential.compute_parameters(0.2)
+    assert early_parameters is not None and boundary_parameters is not None
+    assert early_parameters["guidance_weight"] == 0.0
+    assert boundary_parameters["guidance_weight"] == 0.5
+    assert early_parameters["resampling_weight"] == 0.5
+    assert boundary_parameters["guidance_interval"] == 4
 
 
 def test_samplers_are_public() -> None:

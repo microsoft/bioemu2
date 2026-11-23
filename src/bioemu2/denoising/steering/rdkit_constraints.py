@@ -118,7 +118,10 @@ def compute_chiral_atom_constraints(mol, idx_map):
             neighbors = tuple(neighbor[0] for neighbor in neighbors)
             is_r = orientation == "R"
 
-            if len(neighbors) > 4 or center.GetHybridization() != HybridizationType.SP3:
+            # Requires explicit hydrogens. A centre with three neighbours carries a lone pair
+            # (sulfoxide, selenoxide, arsine), where the legacy R/S label can be inverted
+            # relative to the geometry, so it gets no term rather than a wrong one.
+            if len(neighbors) != 4 or center.GetHybridization() != HybridizationType.SP3:
                 continue
 
             atom_idxs = (*neighbors[:3], center_idx)
@@ -131,21 +134,20 @@ def compute_chiral_atom_constraints(mol, idx_map):
                     )
                 )
 
-            if len(neighbors) == 4:
-                for skip_idx in range(3):
-                    chiral_set = neighbors[:skip_idx] + neighbors[skip_idx + 1 :]
-                    if skip_idx % 2 == 0:
-                        atom_idxs = chiral_set[::-1] + (center_idx,)
-                    else:
-                        atom_idxs = chiral_set + (center_idx,)
-                    if all(i in idx_map for i in atom_idxs):
-                        constraints.append(
-                            ParsedChiralAtomConstraint(
-                                atom_idxs=tuple(idx_map[i] for i in atom_idxs),
-                                is_reference=False,
-                                is_r=is_r,
-                            )
+            for skip_idx in range(3):
+                chiral_set = neighbors[:skip_idx] + neighbors[skip_idx + 1 :]
+                if skip_idx % 2 == 0:
+                    atom_idxs = chiral_set[::-1] + (center_idx,)
+                else:
+                    atom_idxs = chiral_set + (center_idx,)
+                if all(i in idx_map for i in atom_idxs):
+                    constraints.append(
+                        ParsedChiralAtomConstraint(
+                            atom_idxs=tuple(idx_map[i] for i in atom_idxs),
+                            is_reference=False,
+                            is_r=is_r,
                         )
+                    )
     return constraints
 
 

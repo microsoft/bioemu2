@@ -22,13 +22,15 @@ from bioemu2.physicality import (
     PhysicalityFilterMode,
     _select_expected_extra_bonds,
     check_allatom_physicality,
+    normalize_physicality_mode,
 )
 from bioemu2.sampling import (
+    BATCH_DIR,
     SamplerPreset,
     expected_extra_bonds_from_system,
     generate_samples,
-    rng_seed,
     sampler_from_preset,
+    write_sampling_output,
 )
 from bioemu2.structure.preparation import prepare_sampling_inputs
 from bioemu2.trajectory_io import (
@@ -61,6 +63,8 @@ def simulate_trajectory(
     sampler: SamplerPreset = "edm",
     seed: int | None = None,
     display_propagation_progress: bool = True,
+    output_dir: str | Path | None = None,
+    physicality_mode: PhysicalityFilterMode | str = PhysicalityFilterMode.HIGH_QUALITY,
 ) -> list[mdtraj.Trajectory]:
     """Simulate time-ordered trajectories with a loaded model and acquired MSA.
 
@@ -81,8 +85,18 @@ def simulate_trajectory(
         batch_size: Maximum trajectories per denoiser call.
         sampler: Sampling preset; ``"edm"`` or ``"edm_gd"``. Resampling
             presets are not supported for multi-step trajectories.
-        seed: Optional Torch random seed for the complete rollout.
+        seed: Optional Torch random seed. Batch ``i`` of step ``t`` uses
+            ``seed + t * num_batches + i``. Without it, each step draws a seed from
+            the global RNG.
         display_propagation_progress: Whether to display propagation progress.
+        output_dir: Optional directory for ``samples_000000.xtc`` and
+            ``physicality_000000.json``, ... (one each per trajectory), topology.cif
+            and system.yaml. Raw batches
+            are kept as ``output_dir/batches/step_{t}/samples_{start}-{stop}.npy``; a
+            rerun with the same directory continues from them after checking the
+            inputs recorded in ``run.json`` and the initial ``x0``. Without it,
+            nothing is written.
+        physicality_mode: Check thresholds for saved outputs; no frames are removed.
 
     Returns:
         One time-ordered MDTraj trajectory per starting frame, in input order.
@@ -118,6 +132,9 @@ def simulate_trajectory(
         sampler=configured_sampler,
         seed=seed,
         display_propagation_progress=display_propagation_progress,
+        output_dir=output_dir,
+        physicality_mode=physicality_mode,
+        contacts=contacts,
     )
 
 
@@ -133,6 +150,9 @@ def simulate_trajectory_with_embeddings(
     sampler: Sampler,
     seed: int | None = None,
     display_propagation_progress: bool = True,
+    output_dir: str | Path | None = None,
+    physicality_mode: PhysicalityFilterMode | str = PhysicalityFilterMode.HIGH_QUALITY,
+    contacts: list[Contact] | None = None,
 ) -> list[mdtraj.Trajectory]:
     """Simulate independent time-lagged trajectories with reusable embeddings.
 
@@ -144,8 +164,10 @@ def simulate_trajectory_with_embeddings(
     Each returned ``mdtraj.Trajectory`` contains frames in time order, rather
     than an unordered collection of samples.
 
-    At the end of the rollout, all frames are checked against the
-    ``"high_quality"`` physicality thresholds. The result is logged, but no
+    At the end of the rollout, all frames are checked for physicality: without
+    ``output_dir`` against the ``"high_quality"`` thresholds, with the result
+    logged; with it, against ``physicality_mode``, saved per trajectory to
+    ``physicality_000000.json``, ... No
     frames are removed and physicality failures do not interrupt propagation.
 
     Args:
@@ -161,15 +183,27 @@ def simulate_trajectory_with_embeddings(
         batch_size: Maximum trajectories per denoiser call.
         sampler: Preconfigured sampling algorithm, including its step scale.
             Samplers with resampling enabled are not supported.
-        seed: Optional Torch random seed for the complete rollout.
+        seed: Optional Torch random seed. Batch ``i`` of step ``t`` uses
+            ``seed + t * num_batches + i``. Without it, each step draws a seed from
+            the global RNG.
         display_propagation_progress: Whether to display propagation progress.
+        output_dir: Optional directory for ``samples_000000.xtc`` and
+            ``physicality_000000.json``, ... (one each per trajectory), topology.cif
+            and system.yaml. Raw batches
+            are kept as ``output_dir/batches/step_{t}/samples_{start}-{stop}.npy``; a
+            rerun with the same directory continues from them after checking the
+            inputs recorded in ``run.json`` and the initial ``x0``. Without it,
+            nothing is written.
+        physicality_mode: Check thresholds for saved outputs; no frames are removed.
+        contacts: Contacts used for ``trunk_embeddings``, recorded in system.yaml.
 
     Returns:
         One time-ordered MDTraj trajectory per starting frame, in input order.
 
     Raises:
-        ValueError: If ``num_trajectory_steps`` is not positive or propagation
-            inputs are invalid.
+        ValueError: If ``num_trajectory_steps`` is not positive, propagation
+            inputs are invalid, or ``output_dir/batches`` holds batches with
+            different inputs recorded in ``run.json`` or a different ``x0``.
     """
     if num_trajectory_steps < 1:
         raise ValueError("num_trajectory_steps must be a positive integer.")
@@ -182,28 +216,49 @@ def simulate_trajectory_with_embeddings(
         raise ValueError(
             "Multi-step trajectory simulation does not support samplers with resampling enabled."
         )
+    out = Path(output_dir) if output_dir is not None else None
+    physicality_mode = normalize_physicality_mode(physicality_mode)
+    # Seeds rise linearly over the rollout: batch i of step t uses seed + t * num_batches + i.
+    if len(x0) == 0:
+        raise ValueError("x0 must be a non-empty mdtraj.Trajectory.")
+    num_batches = len(range(0, len(x0), batch_size or len(x0)))
     # Each step holds one frame per starting configuration in the same order.
     step_frames: list[mdtraj.Trajectory] = [x0]
-    with rng_seed(seed):
-        for _ in trange(
-            num_trajectory_steps, desc="Propagating", disable=not display_propagation_progress
-        ):
-            step_frames.append(
-                propagate_with_embeddings(
-                    system,
-                    trunk_embeddings,
-                    x0=step_frames[-1],
-                    lag_time_ns=lag_time_ns,
-                    model=model,
-                    batch_size=batch_size,
-                    sampler=sampler,
-                    seed=None,
-                    progress=False,
-                )
+    if out is not None:
+        _check_x0(out / BATCH_DIR / "step_000000", x0)
+    for step in trange(
+        num_trajectory_steps, desc="Propagating", disable=not display_propagation_progress
+    ):
+        step_frames.append(
+            _propagate_with_embeddings(
+                system,
+                trunk_embeddings,
+                x0=step_frames[-1],
+                lag_time_ns=lag_time_ns,
+                model=model,
+                batch_size=batch_size,
+                sampler=sampler,
+                seed=None if seed is None else seed + step * num_batches,
+                progress=False,
+                batch_dir=out / BATCH_DIR / f"step_{step:06d}" if out is not None else None,
+                contacts=contacts,
             )
+        )
 
     trajectories = join_trajectory_steps(step_frames, lag_time_ns=lag_time_ns)
-    _report_trajectory_physicality(trajectories, system)
+    if out is None:
+        _report_trajectory_physicality(trajectories, system)
+    else:
+        for i, trajectory in enumerate(trajectories):
+            write_sampling_output(
+                trajectory,
+                system=system,
+                mode="equilibrium",
+                contacts=contacts,
+                out=out,
+                physicality_filter=physicality_mode,
+                suffix=f"_{i:06d}",
+            )
     return trajectories
 
 
@@ -306,6 +361,8 @@ def propagate(
     sampler: SamplerPreset = "edm",
     seed: int | None = None,
     progress: bool = True,
+    output_dir: str | Path | None = None,
+    physicality_mode: PhysicalityFilterMode | str = PhysicalityFilterMode.HIGH_QUALITY,
 ) -> mdtraj.Trajectory:
     """Sample time-lagged endpoints with a loaded model and acquired MSA.
 
@@ -341,6 +398,10 @@ def propagate(
             ``"edm_fkc"``). Resampling presets require identical starting frames.
         seed: Optional Torch random seed.
         progress: Whether to display sampling progress.
+        output_dir: Optional directory for samples.xtc (endpoints only, without
+            ``x0``), topology.cif, system.yaml and physicality.json; see
+            ``sample_with_embeddings`` for raw batches. Without it, nothing is written.
+        physicality_mode: Check thresholds for saved outputs; no frames are removed.
 
     Returns:
         One endpoint per starting frame, or ``num_samples`` endpoints from a
@@ -373,7 +434,28 @@ def propagate(
         sampler=configured_sampler,
         seed=seed,
         progress=progress,
+        output_dir=output_dir,
+        physicality_mode=physicality_mode,
+        contacts=contacts,
     )
+
+
+def _check_x0(batch_dir: Path, x0: mdtraj.Trajectory) -> None:
+    """Keep the starting frames next to ``run.json``; refuse batches from other ones."""
+    path = batch_dir / "x0.npy"
+    if any(batch_dir.glob("samples_*.done")):
+        if not path.is_file():
+            raise ValueError(
+                f"{batch_dir} holds batches but no x0.npy; use a new output directory or delete it."
+            )
+        if not np.array_equal(np.load(path), x0.xyz):
+            raise ValueError(
+                f"{batch_dir} holds batches with a different x0; "
+                "use a new output directory or delete it."
+            )
+    else:
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        np.save(path, x0.xyz, allow_pickle=False)
 
 
 def propagate_with_embeddings(
@@ -387,6 +469,9 @@ def propagate_with_embeddings(
     sampler: Sampler,
     seed: int | None = None,
     progress: bool = True,
+    output_dir: str | Path | None = None,
+    physicality_mode: PhysicalityFilterMode | str = PhysicalityFilterMode.HIGH_QUALITY,
+    contacts: list[Contact] | None = None,
 ) -> mdtraj.Trajectory:
     """Propagate starting conformations using precomputed embeddings.
 
@@ -395,6 +480,71 @@ def propagate_with_embeddings(
     Each endpoint is aligned to its corresponding ``x0`` frame. Resampling
     requires identical frames within each resampling group (all frames if the
     group size is ``None``). Batch size must align with group boundaries.
+
+    With ``output_dir``, endpoints (without ``x0``) are saved as samples.xtc with
+    topology.cif, system.yaml and physicality.json; completed raw batches in
+    ``output_dir/batches`` are kept so a rerun with the same directory continues.
+    Without it, nothing is written. ``physicality_mode`` selects the check
+    thresholds; no frames are removed. ``contacts`` are recorded in system.yaml.
+    """
+    out = Path(output_dir) if output_dir is not None else None
+    physicality_mode = normalize_physicality_mode(physicality_mode)
+    batch_dir = out / BATCH_DIR if out is not None else None
+    if batch_dir is not None:
+        _check_x0(batch_dir, x0)
+    endpoints = _propagate_with_embeddings(
+        system,
+        trunk_embeddings,
+        x0=x0,
+        lag_time_ns=lag_time_ns,
+        model=model,
+        batch_size=batch_size,
+        sampler=sampler,
+        seed=seed,
+        progress=progress,
+        batch_dir=batch_dir,
+        contacts=contacts,
+    )
+    if out is not None:
+        saved = endpoints[:]
+        saved.time = np.full(saved.n_frames, lag_time_ns * 1000.0)
+        write_sampling_output(
+            saved,
+            system=system,
+            mode="equilibrium",
+            contacts=contacts,
+            out=out,
+            physicality_filter=physicality_mode,
+        )
+    return endpoints
+
+
+def _propagate_with_embeddings(
+    system: System,
+    trunk_embeddings: TrunkEmbeddings,
+    *,
+    x0: mdtraj.Trajectory,
+    lag_time_ns: float,
+    model: InferenceModel[TrunkEmbeddings],
+    batch_size: int | None,
+    sampler: Sampler,
+    seed: int | None,
+    progress: bool,
+    batch_dir: Path | None,
+    contacts: list[Contact] | None,
+) -> mdtraj.Trajectory:
+    """Propagate ``x0`` by one lag step; save raw batches only, never final outputs.
+
+    Shared by ``propagate_with_embeddings``, which runs one step, and
+    ``simulate_trajectory_with_embeddings``, which runs one per rollout step.
+    ``propagate_with_embeddings`` generates its final .xtc and .cif file after a single
+    call to ``_propagate_with_embeddings``. ``simulate_trajectory_with_embeddings``
+    calls ``_propagate_with_embeddings`` in a loop and generates its final trajectory
+    file after the loop.
+
+    Validates the inputs, conditions each sample on its ``x0`` frame, samples
+    with resumable batches in ``batch_dir``, and superposes each endpoint on its
+    starting frame.
     """
     if not model.supports_propagation:
         raise ValueError("The loaded checkpoint does not support propagation.")
@@ -422,7 +572,7 @@ def propagate_with_embeddings(
     ):
         # Resampling copies particles within groups of `resampling_group_size`
         # consecutive samples; every group must share one conditioning frame.
-        # None resamples a whole chunk, so then all of x0 must be identical.
+        # None resamples a whole step batch, so then all of x0 must be identical.
         group = getattr(sampler, "resampling_group_size", None) or len(x0)
         if group < len(x0) and batch_size < len(x0) and batch_size % group:
             raise ValueError(
@@ -442,29 +592,27 @@ def propagate_with_embeddings(
     coords_cond = input_coords.new_zeros(len(input_coords), batch.atom_pad_mask.shape[1], 3)
     coords_cond[:, : topology.n_atoms] = input_coords - input_coords.mean(dim=1, keepdim=True)
 
-    chunks: list[mdtraj.Trajectory] = []
-    with rng_seed(seed):
-        for start in range(0, len(x0), batch_size):
-            chunk = coords_cond[start : start + batch_size]
-            n = len(chunk)
-            chunk_batch = batch.replace(
-                coords_cond=chunk,
-                is_dynamics_conditioned=torch.ones((1, n), dtype=torch.bool, device=chunk.device),
-                dt=torch.full((1, n), lag_time_ns * 1000.0, device=chunk.device),
-            )
-            coords = generate_samples(
-                num_samples=n,
-                batch_size=n,
-                score_model=model,
-                sampler=sampler,
-                num_atoms=topology.n_atoms,
-                system=system,
-                batch=chunk_batch,
-                trunk_embeddings=trunk_embeddings,
-                progress=progress,
-            )
-            chunks.append(coords_angstrom_to_trajectory(coords, topology))
-    trajectory = mdtraj.join(chunks)
+    n = len(x0)
+    coords = generate_samples(
+        num_samples=n,
+        batch_size=batch_size,
+        score_model=model,
+        sampler=sampler,
+        num_atoms=topology.n_atoms,
+        system=system,
+        batch=batch.replace(
+            coords_cond=coords_cond,
+            is_dynamics_conditioned=torch.ones((1, n), dtype=torch.bool, device=coords_cond.device),
+            dt=torch.full((1, n), lag_time_ns * 1000.0, device=coords_cond.device),
+        ),
+        trunk_embeddings=trunk_embeddings,
+        progress=progress,
+        batch_dir=batch_dir,
+        seed=seed,
+        mode="equilibrium",
+        contacts=contacts,
+    )
+    trajectory = coords_angstrom_to_trajectory(coords, topology)
 
     # Superpose each endpoint on its own input frame.
     mask = torch.ones(x0.xyz.shape[:2])

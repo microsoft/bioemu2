@@ -72,7 +72,7 @@ default physicality potentials:
 ```bash
 bioemu2 sample-equilibrium \
     --pdb-id 101M \
-    --out outputs/myoglobin --sampler edm_gd
+    --out outputs/myoglobin-101m --sampler edm_gd
 ```
 
 There are three steering presets on the CLI: `edm_gd` (FK guidance-only),

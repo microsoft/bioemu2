@@ -205,6 +205,7 @@ def test_high_level_sampling_saves_all_frames_and_physicality(
         "topology.cif",
         "system.yaml",
         "physicality.json",
+        "batches",
     }
     reloaded = mdtraj.load_xtc(str(out / "samples.xtc"), top=str(out / "topology.cif"))
     np.testing.assert_allclose(reloaded.xyz, samples.xyz, atol=1e-3, rtol=0)
@@ -229,29 +230,6 @@ def test_high_level_sampling_saves_all_frames_and_physicality(
     config = OmegaConf.load(out / "system.yaml")
     assert config["mode"] == mode
     assert config["entities"][0]["asym_ids"] == ["A"]
-
-
-def test_high_level_output_preserves_caller_owned_partial_batches(
-    tiny_checkpoint: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    system = System(entities=[Protein(sequence="AAA", asym_ids=["A"])])
-    monkeypatch.setattr(sampling_api, "get_msa", lambda system: MSA({"A": ">query\nAAA\n"}))
-    raw = tmp_path / "caller-owned"
-    raw.mkdir()
-    (raw / "keep.txt").write_text("caller data")
-    sample_equilibrium(
-        system,
-        model=load_model(checkpoint_path=tiny_checkpoint, device="cpu"),
-        num_samples=1,
-        num_steps=2,
-        progress=False,
-        partial_dir=raw,
-        output_dir=tmp_path / "output",
-        physicality_mode="no_filter",
-    )
-    assert (raw / "keep.txt").read_text() == "caller data"
-    assert (raw / "samples_000000-000001.npy").is_file()
-    assert (raw / "samples_000000-000001.done").is_file()
 
 
 @pytest.mark.parametrize("mode", ["equilibrium", "structure"])
@@ -375,7 +353,8 @@ def test_resume_completed_batches(
         progress=False,
     )
     expected = sample() if seed is not None else None
-    partial_dir = tmp_path / "interrupted"
+    out = tmp_path / "interrupted"
+    batches = out / "batches"
     sizes: list[int] = []
     interrupt = True
     denoise = EDMSampler.__call__
@@ -400,25 +379,178 @@ def test_resume_completed_batches(
     monkeypatch.setattr(EDMSampler, "__call__", sample_batch)
     monkeypatch.setattr(np, "save", save_batch)
     with pytest.raises(RuntimeError, match="interrupted"):
-        sample(partial_dir=partial_dir)
-    assert (partial_dir / "samples_000000-000002.done").is_file()
-    assert not (partial_dir / "samples_000002-000004.done").exists()
-    saved_first = np.load(partial_dir / "samples_000000-000002.npy")
+        sample(output_dir=out)
+    assert (batches / "samples_000000-000002.done").is_file()
+    assert not (batches / "samples_000002-000004.done").exists()
+    assert not (out / "samples.xtc").exists()
+    saved_first = np.load(batches / "samples_000000-000002.npy")
 
     interrupt = False
     sizes.clear()
-    resumed = sample(partial_dir=partial_dir)
+    resumed = sample(output_dir=out, physicality_mode="no_filter")
     assert sizes == [2, 1]
-    if expected is not None:
-        np.testing.assert_array_equal(resumed.xyz, expected.xyz)
+    np.testing.assert_allclose(resumed.xyz[:2], saved_first / 10.0, rtol=1e-6, atol=1e-7)
+    if expected is None:
+        # An unseeded run records no seed and samples the rest with a fresh one.
+        assert json.loads((batches / "run.json").read_text())["seed"] is None
     else:
-        np.testing.assert_allclose(resumed.xyz[:2], saved_first / 10.0, rtol=1e-6, atol=1e-7)
-        assert not np.array_equal(resumed.xyz[:2], resumed.xyz[2:4])
+        np.testing.assert_array_equal(resumed.xyz, expected.xyz)
 
+    # Raw batches are kept after saving.
+    assert (batches / "run.json").is_file()
+    saved = mdtraj.load_xtc(str(out / "samples.xtc"), top=str(out / "topology.cif"))
+    assert saved.n_frames == 5
+
+    # NumPy integers are recorded like ints.
+    if seed is not None:
+        sizes.clear()
+        sample(
+            output_dir=out,
+            seed=np.int64(seed),
+            num_samples=np.int64(5),
+            physicality_mode="no_filter",
+        )
+        assert sizes == []
+
+    # Batches from a run with different inputs are refused before sampling.
     sizes.clear()
-    repeated = sample(partial_dir=partial_dir)
+    with pytest.raises(ValueError, match="different seed"):
+        sample(output_dir=out, seed=7)
+    with pytest.raises(ValueError, match="different num_steps"):
+        sample(output_dir=out, sampler=EDMSampler(num_steps=3))
+    with pytest.raises(ValueError, match="different batch_size"):
+        sample(output_dir=out, batch_size=3)
+    with pytest.raises(ValueError, match="different num_samples"):
+        sample(output_dir=out, num_samples=6)
+    with pytest.raises(ValueError, match="different mode"):
+        sample(output_dir=out, mode="structure")
+    contact = Contact(token1={"asym_id": "A", "res_id": 1}, token2={"asym_id": "A", "res_id": 3})
+    with pytest.raises(ValueError, match="different contacts"):
+        sample(output_dir=out, contacts=[contact])
+    with pytest.raises(ValueError, match="different step_scale"):
+        sample(output_dir=out, sampler=EDMSampler(num_steps=2, step_scale=1.5))
+    monkeypatch.setattr(model, "model_fingerprint", "other")
+    with pytest.raises(ValueError, match="different model"):
+        sample(output_dir=out)
+    (batches / "run.json").write_text("{}")
+    with pytest.raises(ValueError, match="different system"):
+        sample(output_dir=out)
+    (batches / "run.json").unlink()
+    with pytest.raises(ValueError, match="no run.json"):
+        sample(output_dir=out)
     assert sizes == []
-    np.testing.assert_array_equal(repeated.xyz, resumed.xyz)
+
+
+def test_propagate_resumes_batches(
+    tiny_checkpoint: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    system = System(entities=[Protein(sequence="AAA", asym_ids=["A"])])
+    model = load_model(checkpoint_path=tiny_checkpoint, device="cpu")
+    trunk = model.embed(system, msa=MSA({"A": ">query\nAAA\n"}), mode="equilibrium")
+    x0 = sample_with_embeddings(
+        system, trunk, model=model, num_samples=1, sampler=EDMSampler(num_steps=2), progress=False
+    )[[0] * 4]
+    run = partial(
+        propagate_with_embeddings,
+        system,
+        trunk,
+        x0=x0,
+        lag_time_ns=1.0,
+        model=model,
+        batch_size=2,
+        sampler=EDMSampler(num_steps=2),
+        seed=3,
+        progress=False,
+        physicality_mode="no_filter",
+    )
+    expected = run()
+    calls = 0
+    denoise = EDMSampler.__call__
+
+    def flaky(self, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("interrupted")
+        return denoise(self, **kwargs)
+
+    monkeypatch.setattr(EDMSampler, "__call__", flaky)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        run(output_dir=tmp_path)
+    assert (tmp_path / "batches" / "samples_000000-000002.done").is_file()
+
+    resumed = run(output_dir=tmp_path)
+    assert calls == 3  # only the second batch is sampled again
+    np.testing.assert_array_equal(resumed.xyz, expected.xyz)
+    assert not np.array_equal(resumed.xyz[:2], resumed.xyz[2:])  # per-batch seeds
+    np.testing.assert_array_equal(np.load(tmp_path / "batches" / "x0.npy"), x0.xyz)
+
+    # Batches from other starting frames, lag time or contacts are refused.
+    other = x0[:]
+    other.xyz = x0.xyz * 1.05
+    with pytest.raises(ValueError, match="different x0"):
+        run(output_dir=tmp_path, x0=other)
+    with pytest.raises(ValueError, match="different dt"):
+        run(output_dir=tmp_path, lag_time_ns=2.0)
+    contact = Contact(token1={"asym_id": "A", "res_id": 1}, token2={"asym_id": "A", "res_id": 3})
+    with pytest.raises(ValueError, match="different contacts"):
+        run(output_dir=tmp_path, contacts=[contact])
+    (tmp_path / "batches" / "x0.npy").unlink()
+    with pytest.raises(ValueError, match="no x0.npy"):
+        run(output_dir=tmp_path)
+
+
+def test_simulate_trajectory_resumes_unseeded_rollout(
+    tiny_checkpoint: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    system = System(entities=[Protein(sequence="AAA", asym_ids=["A"])])
+    model = load_model(checkpoint_path=tiny_checkpoint, device="cpu")
+    trunk = model.embed(system, msa=MSA({"A": ">query\nAAA\n"}), mode="equilibrium")
+    x0 = sample_with_embeddings(
+        system, trunk, model=model, num_samples=1, sampler=EDMSampler(num_steps=2), progress=False
+    )[[0] * 4]
+    run = partial(
+        propagation_api.simulate_trajectory_with_embeddings,
+        system,
+        trunk,
+        x0=x0,
+        lag_time_ns=1.0,
+        num_trajectory_steps=2,
+        model=model,
+        batch_size=2,
+        sampler=EDMSampler(num_steps=2),
+        display_propagation_progress=False,
+        physicality_mode="no_filter",
+    )
+    calls = 0
+    denoise = EDMSampler.__call__
+
+    def flaky(self, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 3:  # first batch of step 1
+            raise RuntimeError("interrupted")
+        return denoise(self, **kwargs)
+
+    monkeypatch.setattr(EDMSampler, "__call__", flaky)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        run(output_dir=tmp_path)
+    batches = tmp_path / "batches"
+    assert sorted(path.relative_to(batches).as_posix() for path in batches.rglob("*.done")) == [
+        "step_000000/samples_000000-000002.done",
+        "step_000000/samples_000002-000004.done",
+    ]
+
+    resumed = run(output_dir=tmp_path)
+    assert calls == 5  # only step 1 is sampled again
+    assert [trajectory.n_frames for trajectory in resumed] == [3] * 4
+    assert json.loads((batches / "step_000000" / "run.json").read_text())["seed"] is None
+    assert (tmp_path / "samples_000003.xtc").is_file()
+    np.testing.assert_array_equal(np.load(batches / "step_000000" / "x0.npy"), x0.xyz)
+    other = x0[:]
+    other.xyz = x0.xyz * 1.05
+    with pytest.raises(ValueError, match="different x0"):
+        run(output_dir=tmp_path, x0=other)
 
 
 @pytest.mark.parametrize("sampler_type", [FKCSampler, GuidedFKSampler])
@@ -435,7 +567,7 @@ def test_sampling_preserves_each_batch_diagnostics(
         sampler.num_gd_steps = 0
         sampler.resampling_interval = 1
     run_dir = tmp_path / "batched"
-    partial_dir = tmp_path / "partial"
+    batch_dir = tmp_path / "batches"
     sample = partial(
         generate_samples,
         num_samples=3,
@@ -448,7 +580,7 @@ def test_sampling_preserves_each_batch_diagnostics(
         trunk_embeddings=trunk,
         progress=False,
         run_dir=run_dir,
-        partial_dir=partial_dir,
+        batch_dir=batch_dir,
         seed=13,
     )
     expected_coords = sample()
@@ -480,7 +612,7 @@ def test_sampling_preserves_each_batch_diagnostics(
     }
     for path in metrics_dir.glob("*_000002-000003.npy"):
         path.write_bytes(b"incomplete")
-    (partial_dir / "samples_000002-000003.done").unlink()
+    (batch_dir / "samples_000002-000003.done").unlink()
 
     resumed_coords = sample()
     torch.testing.assert_close(resumed_coords, expected_coords, rtol=0, atol=0)
@@ -1331,6 +1463,7 @@ def test_cli_pipeline(
         "topology.cif",
         "system.yaml",
         "command.txt",
+        "batches",
     }
     trajectory = mdtraj.load_xtc(str(out / sorted(xtcs)[0]), top=str(out / "topology.cif"))
     assert trajectory.n_frames == n_frames
@@ -1357,7 +1490,7 @@ def test_cli_pipeline(
         ("predict-structure", "physicality.json"),
     ],
 )
-def test_cli_resumes_and_cleans_up_after_saving(
+def test_cli_resumes_after_failed_save(
     tmp_path: Path,
     tiny_checkpoint: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1392,7 +1525,7 @@ def test_cli_resumes_and_cleans_up_after_saving(
         str(out),
     ]
     runner = CliRunner()
-    partial_dir = out / "partial"
+    batches = out / "batches"
     save_xtc = mdtraj.Trajectory.save_xtc
     write_text = Path.write_text
 
@@ -1415,14 +1548,14 @@ def test_cli_resumes_and_cleans_up_after_saving(
     )
     with failure, pytest.raises(OSError, match="interrupted"):
         runner.invoke(cli.main, args, catch_exceptions=False)
-    saved = np.concatenate([np.load(path) for path in sorted(partial_dir.glob("*.npy"))])
+    saved = np.concatenate([np.load(path) for path in sorted(batches.glob("*.npy"))])
 
     with patch.object(
         EDMSampler, "__call__", side_effect=AssertionError("Completed batches must be reused")
     ):
         resumed = runner.invoke(cli.main, args, catch_exceptions=False)
     assert resumed.exit_code == 0
-    assert not partial_dir.exists()
+    assert (batches / "run.json").is_file()
     samples = mdtraj.load_xtc(str(out / "samples.xtc"), top=str(out / "topology.cif"))
     assert samples.n_frames == 5
     np.testing.assert_allclose(samples.xyz, saved / 10.0, rtol=0, atol=1e-3)
@@ -1472,7 +1605,6 @@ def test_cli_writes_rejected_samples(
     samples = mdtraj.load_xtc(str(out / "samples.xtc"), top=str(out / "topology.cif"))
     assert samples.n_frames == 2
     assert not (out / "samples_rejected.xtc").exists()
-    assert not (out / "partial").exists()
     assert json.loads((out / "physicality.json").read_text()) == [
         {
             "frame": i,
@@ -1503,25 +1635,27 @@ def test_propagate_reports_physicality_without_dropping_endpoints(
 ) -> None:
     """All endpoints remain in order, even when all fail physicality checks."""
     _mock_cli_msa(monkeypatch)
-    monkeypatch.setattr(cli, "PHYSICALITY_FRAME_CHUNK_SIZE", 1)
     checked = 0
     failure_reasons = ["bad_bonds_backbone" if reject_all else None, "within_residue_clashes"]
 
     def check(trajectory: mdtraj.Trajectory, mode, expected_extra_bonds) -> PhysicalityReport:
         nonlocal checked
-        assert len(trajectory) == 1
-        reason = failure_reasons[checked]
+        assert len(trajectory) == 2
         checked += 1
-        return PhysicalityReport(passed=np.array([reason is None]), reasons=[reason], mode=mode)
+        return PhysicalityReport(
+            passed=np.array([reason is None for reason in failure_reasons]),
+            reasons=failure_reasons,
+            mode=mode,
+        )
 
-    monkeypatch.setattr(cli, "check_physicality", check)
+    monkeypatch.setattr(sampling_api, "check_physicality", check)
     out = tmp_path / "out"
     args = _propagate_argv(tiny_checkpoint, out, x0_args)
     top = str(out / "topology.cif")
 
     result = CliRunner().invoke(cli.main, args, catch_exceptions=False)
     assert result.exit_code == 0
-    assert checked == 2
+    assert checked == 1
     assert {p.name for p in out.iterdir() if p.suffix == ".xtc"} == {"samples.xtc"}
     endpoints = mdtraj.load_xtc(str(out / "samples.xtc"), top=top)
     assert endpoints.n_frames == 2
@@ -1541,50 +1675,24 @@ def test_protein_free_propagation_reports_unchecked_chunks(
 ) -> None:
     system = System(entities=[DNA(sequence="ACGT", asym_ids=["D"])])
     topology = system.topology
-    x0 = mdtraj.Trajectory(np.zeros((1, topology.n_atoms, 3)), topology)
     endpoints = mdtraj.Trajectory(np.zeros((2, topology.n_atoms, 3)), topology)
     out = tmp_path / "output"
     out.mkdir()
-    monkeypatch.setattr(cli, "PHYSICALITY_FRAME_CHUNK_SIZE", 1)
 
     with caplog.at_level(logging.INFO):
-        cli._write_propagation_output(system, x0=x0, lag_time_ns=1.0, out=out, endpoints=endpoints)
+        sampling_api.write_sampling_output(
+            endpoints,
+            system=system,
+            mode="equilibrium",
+            contacts=None,
+            out=out,
+            physicality_filter=PhysicalityFilterMode.HIGH_QUALITY,
+        )
 
     assert json.loads((out / "physicality.json").read_text()) == [
         {"frame": i, "status": "not_checked", "reason": None} for i in range(2)
     ]
-    assert "2 unchecked endpoints" in caplog.text
-    assert "passed physicality checks" not in caplog.text
-
-
-@pytest.mark.parametrize("name", ["samples.xtc", "physicality.json", "samples_rejected.xtc"])
-def test_propagate_refuses_existing_outputs(tmp_path: Path, name: str) -> None:
-    out = tmp_path / "out"
-    out.mkdir()
-    existing = out / name
-    existing.write_text("previous result")
-
-    result = CliRunner().invoke(
-        cli.main,
-        [
-            "propagate",
-            "--system",
-            "unused.yaml",
-            "--x0-cif",
-            "unused.cif",
-            "--num-samples",
-            "1",
-            "--lag-time-ns",
-            "1",
-            "--out",
-            str(out),
-        ],
-    )
-
-    assert result.exit_code == 2
-    assert "Propagation output already exists" in result.output
-    assert existing.read_text() == "previous result"
-    assert not (out / "command.txt").exists()
+    assert "failed physicality checks" not in caplog.text
 
 
 @pytest.mark.parametrize("num_samples", [1, 3])

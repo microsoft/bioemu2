@@ -31,7 +31,6 @@ from bioemu2.context_parallel.modules.diffusion import CPStaticContext
 from bioemu2.denoising import cp_sync
 from bioemu2.denoising.steering.potentials import BondLengthPotential
 from bioemu2.model import _InferenceModel, load_model_for_inference
-from bioemu2.sampling import generate_samples
 from bioemu2.structure import AllAtomStructure, BatchAllAtomStructure
 from bioemu2.structure.batch import batch_collate
 from bioemu2.structure.preparation import prepare_structure
@@ -229,8 +228,11 @@ def run_api_on_gpu(
             # Match padding and batch sizes to compare identical RNG draws.
             # Override only the sampler's CP-mode check for the serial reference;
             # wrapped helpers retain real RNG synchronization and broadcasts.
+            # CP draws every batch from one seed-42 stream, while generate_samples
+            # reseeds each batch, so replay the serial batches in one stream.
             with (
                 cp._rng_seed(42, model.device),
+                torch.no_grad(),
                 patch(
                     "bioemu2.denoising.steering.edm_steered.cp_sync",
                     wraps=cp_sync,
@@ -238,17 +240,18 @@ def run_api_on_gpu(
                 ) as serial_sync,
             ):
                 serial_sync.is_distributed_sampling.return_value = False
-                reference = generate_samples(
-                    num_samples=3,
-                    batch_size=2,
-                    score_model=serial,
-                    sampler=sampler,
-                    num_atoms=system.topology.n_atoms,
-                    system=system,
-                    batch=sampling_batch,
-                    trunk_embeddings=serial_trunk,
-                    progress=False,
-                )
+                for potential in getattr(sampler, "potentials", ()):
+                    potential.prepare(system)
+                parts = []
+                for size in (2, 1):
+                    coords = sampler(
+                        batch=sampling_batch,
+                        score_model=serial,
+                        trunk_embeddings=serial_trunk,
+                        batch_size=size,
+                    ).coords.view(size, -1, 3)[:, : system.topology.n_atoms]
+                    parts.append(coords - coords.mean(dim=1, keepdim=True))
+                reference = torch.cat(parts)
             np.testing.assert_allclose(
                 samples.xyz, reference.cpu().numpy() / 10, atol=1e-4, rtol=1e-4
             )

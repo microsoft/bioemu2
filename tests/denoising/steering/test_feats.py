@@ -9,7 +9,13 @@ from rdkit import Chem
 
 from bioemu2.data_interface import Ligand, Protein, System
 from bioemu2.denoising.steering import feats
-from bioemu2.denoising.steering.feats import Tracker, ligand_ccd_codes_from_system
+from bioemu2.denoising.steering.feats import Tracker
+from bioemu2.denoising.steering.potentials import (
+    ChiralAtomPotential,
+    FeatsPotential,
+    StereoBondPotential,
+)
+from bioemu2.structure import AllAtomStructure
 
 
 @pytest.mark.parametrize("cache_hit", [True, False], ids=["cache-hit", "cache-miss"])
@@ -43,33 +49,57 @@ def test_load_ccd_prefers_cache_and_downloads_on_miss(
     assert ccd["LIG"].GetNumAtoms() == 3
 
 
-def _protein_only_task() -> System:
-    return System(entities=[Protein(asym_ids=["A"], sequence="GYDPETGTWG")])
+_NAG_SMILES = "CC(=O)N[C@@H]1[C@@H](O)[C@H](O)[C@@H](CO)O[C@H]1O"
+_NAG_INCHI = (
+    "InChI=1S/C8H15NO6/c1-3(11)9-5-7(13)6(12)4(2-10)15-8(5)14"
+    "/h4-8,10,12-14H,2H2,1H3,(H,9,11)/t4-,5-,6-,7-,8-/m1/s1"
+)
+_RETINAL_SMILES = "CC1=C(C(CCC1)(C)C)/C=C/C(=C/C=C/C(=C/C=O)/C)/C"
+_SULFOXIDE_SMILES = "C[S@@](=O)c1ccccc1"
 
 
-def _protein_plus_ligands_task() -> System:
-    """Protein (chain 0), a 2-chain CCD ligand (chains 1, 2), a SMILES ligand (chain 3)."""
-    return System(
+@pytest.mark.parametrize(
+    ("source", "cls", "index_key", "terms_per_copy"),
+    [
+        ({"smiles": _NAG_SMILES}, ChiralAtomPotential, "chiral_atom_index", 5),
+        ({"inchi": _NAG_INCHI}, ChiralAtomPotential, "chiral_atom_index", 5),
+        ({"smiles": _SULFOXIDE_SMILES}, ChiralAtomPotential, "chiral_atom_index", 0),
+        ({"smiles": _RETINAL_SMILES}, StereoBondPotential, "stereo_bond_index", 4),
+    ],
+    ids=["smiles-chiral", "inchi-chiral", "lone-pair-chiral", "smiles-e-z"],
+)
+def test_smiles_and_inchi_ligands_get_stereo_terms_their_template_satisfies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source: dict[str, str],
+    cls: type[FeatsPotential],
+    index_key: str,
+    terms_per_copy: int,
+):
+    """Test that each copy of a SMILES/InChI ligand after a protein gets one term per
+    specified stereocentre or E/Z bond, that the ligand's template satisfies them, and
+    that the mirror image breaks chirality. Lone-pair stereocentres get no term.
+
+    Template embedding is unseeded, so chiral cases use a zero buffer (a pure sign check)
+    to pass for any valid conformer.
+    """
+    monkeypatch.setenv("BIOEMU2_TEMPLATE_CACHE", str(tmp_path))
+    system = System(
         entities=[
-            Protein(asym_ids=["A"], sequence="GYDPETGTWG"),
-            Ligand(asym_ids=["B", "C"], ccd_code="SAM"),
-            Ligand(asym_ids=["D"], smiles="CC1=CC=CC=C1"),
+            Protein(asym_ids=["A"], sequence="GYDPETG"),
+            Ligand(asym_ids=["L", "M"], **source),
         ]
     )
+    potential = cls(parameters={"buffer": 0.0 if cls is ChiralAtomPotential else 0.5236})
+    potential.prepare(system)
+    template_coords = AllAtomStructure.from_system(system, mode="structure").template_coords
+    assert template_coords is not None
+    coords = template_coords[None]
 
-
-def test_ligand_ccd_codes_empty_for_none():
-    assert ligand_ccd_codes_from_system(None) == {}
-
-
-def test_ligand_ccd_codes_empty_for_protein_only():
-    assert ligand_ccd_codes_from_system(_protein_only_task()) == {}
-
-
-def test_ligand_ccd_codes_maps_int_asym_id_and_skips_smiles():
-    # Protein occupies asym_id 0; the SAM ligand spans 1 and 2; the SMILES
-    # ligand at 3 has no CCD code and must be skipped.
-    assert ligand_ccd_codes_from_system(_protein_plus_ligands_task()) == {1: "SAM", 2: "SAM"}
+    assert potential.feats[index_key].shape[-1] == 2 * terms_per_copy
+    assert potential(coords, t=0.0).item() == 0
+    if cls is ChiralAtomPotential and terms_per_copy:
+        assert potential(coords * torch.tensor([-1.0, 1.0, 1.0]), t=0.0).item() > 0
 
 
 @pytest.mark.parametrize("gpu_count", [0, 1, 2], ids=["cpu", "cuda", "two-cuda-devices"])

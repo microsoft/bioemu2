@@ -1,4 +1,4 @@
-"""EDM-Heun sampling with optional FK resampling and gradient guidance."""
+"""EDM sampling with optional FK resampling and gradient guidance."""
 
 import logging
 import math
@@ -98,7 +98,7 @@ def edm_steered_sampler(
     tracker: Tracker | None = None,
     denoise_micro_batch_size: int | None = None,
 ) -> BatchAllAtomStructure:
-    """Sample with EDM Heun updates and optional FK resampling and gradient guidance.
+    """Sample with EDM and optional FK resampling and gradient guidance.
 
     `batch` holds one structure; `multiplicity` conformations are sampled for it
     and form the FK resampling population: every `resampling_interval` steps
@@ -112,7 +112,7 @@ def edm_steered_sampler(
     evaluation; score-model denoising uses the full prepared particle batch.
 
     When `potentials` is empty or neither FK nor GD is enabled, the loop reduces
-    inline to the unsteered EDM Heun path and is byte-identical to
+    inline to the unsteered EDM path and is byte-identical to
     `edm_sampler` (same RNG draws, same returned tensor). The reduction is
     enforced by the parity tests in
     ``tests/denoising/steering/test_samplers_parity.py``.
@@ -365,7 +365,6 @@ def edm_steered_sampler(
             if energy_traj:
                 energy_traj[-1] = energy_traj[-1][idx]
 
-        # Heun step.
         if alignment_reverse_diff:
             with torch.autocast("cuda", enabled=False):
                 atom_coords_noisy, _, _ = weighted_rigid_align(

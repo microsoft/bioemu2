@@ -11,7 +11,6 @@ from typing import cast, get_args
 
 import click
 import mdtraj
-import numpy as np
 import torch.distributed as dist
 import yaml
 from hydra.utils import instantiate
@@ -25,24 +24,18 @@ from bioemu2.denoising.samplers import Sampler
 from bioemu2.denoising.steering.potentials import Potential
 from bioemu2.model import load_model
 from bioemu2.msa.alignment import get_msa
-from bioemu2.physicality import PhysicalityFilterMode, PhysicalityReport
+from bioemu2.physicality import PhysicalityFilterMode
 from bioemu2.propagation import propagate, propagate_with_embeddings
 from bioemu2.sampling import (
     SamplerPreset,
-    check_physicality,
-    expected_extra_bonds_from_system,
     predict_structure,
     sample_equilibrium,
     sampler_from_preset,
-    save_topology_cif,
-    write_sampling_system,
 )
-from bioemu2.structure import AllAtomStructure
 
 logger = logging.getLogger(__name__)
 
 SAMPLER_PRESETS = list(get_args(SamplerPreset))
-PHYSICALITY_FRAME_CHUNK_SIZE = 32
 
 
 def _sampler(
@@ -112,9 +105,10 @@ def _common_options(function: Callable) -> Callable:
             required=True,
             type=click.Path(path_type=Path, file_okay=False),
             metavar="DIR",
-            help="Directory for generated trajectories, topology.cif, system.yaml, and "
-            "command.txt. It is created if it does not exist; command output files from an "
-            "earlier run may be overwritten.",
+            help="Directory for generated trajectories, topology.cif, system.yaml, "
+            "physicality.json, command.txt, and raw batches in batches/. It is created if it "
+            "does not exist. Rerunning with the same --out continues from completed batches "
+            "and overwrites the other files.",
         ),
         click.option(
             "--batch-size",
@@ -125,8 +119,9 @@ def _common_options(function: Callable) -> Callable:
         click.option(
             "--seed",
             type=int,
-            help="Seed for random number generation. By default no seed is set, so repeated "
-            "runs generally produce different random samples.",
+            help="Seed for random number generation. By default a seed is drawn, so repeated "
+            "runs generally produce different random samples. To continue a run, rerun with the "
+            "same --seed or again without one.",
         ),
         click.option(
             "--num-steps",
@@ -225,64 +220,6 @@ def _resolve_common(
         assert x0_cif is not None
         resolved_system, contacts = System.from_cif(x0_cif), None
     return resolved_system, contacts, checkpoint
-
-
-def _write_physicality_report(
-    mask: np.ndarray,
-    reasons: list[str | None],
-    physicality_filter: PhysicalityFilterMode,
-    out: Path,
-    checked: bool,
-) -> None:
-    PhysicalityReport(passed=mask, reasons=reasons, mode=physicality_filter, checked=checked).save(
-        out / "physicality.json"
-    )
-
-
-def _write_propagation_output(
-    system: System,
-    *,
-    x0: mdtraj.Trajectory,
-    lag_time_ns: float,
-    out: Path,
-    endpoints: mdtraj.Trajectory,
-    contacts: list[Contact] | None = None,
-    physicality_filter: PhysicalityFilterMode = PhysicalityFilterMode.HIGH_QUALITY,
-) -> Path:
-    """Write every sampled endpoint to ``samples.xtc`` in input-frame order.
-
-    ``physicality.json`` records the status of each endpoint without removing
-    rejected frames. Only the sampled endpoints are saved; the input ``x0``
-    frames are not included in the XTC.
-    """
-    write_sampling_system(system, mode="equilibrium", contacts=contacts, out=out)
-    structure = AllAtomStructure.from_system(system, mode="equilibrium", contacts=contacts)
-    save_topology_cif(structure, system, x0.xyz[0] * 10.0, out / "topology.cif")
-    expected_extra_bonds = expected_extra_bonds_from_system(system, endpoints.topology)
-    passes_checks = np.empty(endpoints.n_frames, dtype=bool)
-    reasons: list[str | None] = []
-    checked = False
-    for start in range(0, endpoints.n_frames, PHYSICALITY_FRAME_CHUNK_SIZE):
-        chunk = endpoints[start : start + PHYSICALITY_FRAME_CHUNK_SIZE]
-        report = check_physicality(
-            chunk, physicality_filter, expected_extra_bonds=expected_extra_bonds
-        )
-        checked = report.checked
-        passes_checks[start : start + chunk.n_frames] = report.passed
-        reasons.extend(report.reasons)
-    endpoints.time = np.full(endpoints.n_frames, lag_time_ns * 1000.0)
-    endpoints.save_xtc(str(out / "samples.xtc"))
-    _write_physicality_report(passes_checks, reasons, physicality_filter, out, checked)
-    if not checked:
-        logger.info("Wrote %d unchecked endpoints to %s", endpoints.n_frames, out)
-    else:
-        logger.info(
-            "%d/%d endpoints passed physicality checks; results saved in %s",
-            int(passes_checks.sum()),
-            endpoints.n_frames,
-            out,
-        )
-    return out
 
 
 def validate_x0(trajectory: mdtraj.Trajectory, system: System) -> mdtraj.Trajectory:
@@ -537,20 +474,6 @@ def propagate_command(
     """
     if (x0_xtc is None) == (num_samples is None):
         raise click.UsageError("Pass exactly one of --x0-xtc and --num-samples.")
-    existing_outputs = [
-        path
-        for path in (
-            *out.glob("samples_*.xtc"),
-            out / "samples.xtc",
-            out / "physicality.json",
-        )
-        if path.exists()
-    ]
-    if existing_outputs:
-        raise click.UsageError(
-            "Propagation output already exists; use a new --out directory: "
-            + ", ".join(str(path) for path in existing_outputs)
-        )
     resolved_system, contacts, resolved_checkpoint = _resolve_common(
         system=system,
         pdb_id=pdb_id,
@@ -581,7 +504,7 @@ def propagate_command(
         matmul_precision=matmul_precision,
     )
     if num_steps is None and potentials is None:
-        endpoints = propagate(
+        propagate(
             resolved_system,
             model=model,
             x0=x0,
@@ -590,6 +513,8 @@ def propagate_command(
             batch_size=batch_size,
             sampler=cast(SamplerPreset, sampler),
             seed=seed,
+            output_dir=out,
+            physicality_mode=physicality_filter,
         )
     else:
         msa = get_msa(resolved_system)
@@ -599,7 +524,7 @@ def propagate_command(
             mode="equilibrium",
             contacts=contacts,
         )
-        endpoints = propagate_with_embeddings(
+        propagate_with_embeddings(
             resolved_system,
             trunk_embeddings,
             x0=x0,
@@ -608,16 +533,10 @@ def propagate_command(
             batch_size=batch_size,
             sampler=resolved_sampler,
             seed=seed,
+            output_dir=out,
+            physicality_mode=physicality_filter,
+            contacts=contacts,
         )
-    _write_propagation_output(
-        resolved_system,
-        x0=x0,
-        lag_time_ns=lag_time_ns,
-        out=out,
-        endpoints=endpoints,
-        contacts=contacts,
-        physicality_filter=PhysicalityFilterMode(physicality_filter),
-    )
 
 
 @main.group("cp")
@@ -718,6 +637,18 @@ for _command, _mode in _cp_commands:
                 _cp_option.help = (
                     "Precision for trunk embedding. Denoising runs in full precision; "
                     "its float32 matmul precision is set by --matmul-precision."
+                )
+            # CP saves no batches, so it neither resumes nor saves a drawn seed.
+            elif _cp_option.name == "out":
+                _cp_option.help = (
+                    "Directory for generated trajectories, topology.cif, system.yaml, "
+                    "physicality.json, and command.txt. It is created if it does not exist; "
+                    "files from an earlier run are overwritten."
+                )
+            elif _cp_option.name == "seed":
+                _cp_option.help = (
+                    "Seed for random number generation. By default no seed is set, so "
+                    "repeated runs generally produce different random samples."
                 )
         _params.append(_cp_option)
     context_parallel_commands.add_command(
